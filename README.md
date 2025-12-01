@@ -155,6 +155,45 @@ Use `socks5h://` scheme where supported (e.g. in cURL/other clients that
 implement it), otherwise ensure remote DNS resolution in your client
 settings.
 
+## Pyatki Client
+
+**Pyatki** is the official local client for Noski. It runs on your local machine, acts as a standard SOCKS5 server, and tunnels all traffic through an encrypted connection to your remote Noski server.
+
+### Why use Pyatki?
+- **Encryption**: Encrypts traffic from your local machine to the proxy, protecting you from ISP surveillance and DPI.
+- **Compatibility**: Works with any app that supports standard SOCKS5 (browsers, Telegram, etc.) without them needing to know about the encryption.
+
+### Setup
+
+1.  **Configure `.env`**:
+    Add the following to your `.env` file (or set as environment variables):
+
+    ```ini
+    # Address of your remote Noski server
+    NOSKI_REMOTE_ADDR=1.2.3.4:1080
+    
+    # Local address for Pyatki to listen on
+    PYATKI_LOCAL_ADDR=127.0.0.1:1081
+    
+    # Must match the server's key and type
+    ENCRYPTION_KEY=<your-shared-key>
+    ENCRYPTION_TYPE=chacha20
+    ```
+
+2.  **Run Pyatki**:
+
+    ```sh
+    cargo run --release --bin pyatki
+    ```
+
+3.  **Connect your apps**:
+    Configure your browser or application to use the **local** proxy:
+    - **Host**: `127.0.0.1`
+    - **Port**: `1081` (or whatever you set in `PYATKI_LOCAL_ADDR`)
+    - **Type**: SOCKS5
+
+    Now all traffic from that app will be encrypted by Pyatki and sent to Noski.
+
 ## Project Structure
 
     Noski/
@@ -162,7 +201,10 @@ settings.
     ├── .env                            # Environment variables for credentials
     ├── ENCRYPTION.md                   # Encryption layer documentation
     └── src/
-        ├── main.rs                     # Main entry point and server logic
+        ├── lib.rs                      # Shared library (encryption modules)
+        ├── main.rs                     # Noski Server entry point
+        ├── bin/
+        │   └── pyatki.rs               # Pyatki Client entry point
         ├── encryption.rs               # Encryption layer abstraction
         └── xor_encryption_example.rs   # Example encryption implementation
 
