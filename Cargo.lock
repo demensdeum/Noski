@@ -53,6 +53,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "noski"
+version = "1.0.0"
+dependencies = [
+ "dotenv",
+ "tokio",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -137,14 +145,6 @@ checksum = "17129e116933cf371d018bb80ae557e889637989d8638274fb25622827b03881"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "socks5_proxy"
-version = "0.1.0"
-dependencies = [
- "dotenv",
- "tokio",
 ]
 
 [[package]]
