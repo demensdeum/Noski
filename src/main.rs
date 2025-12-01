@@ -7,6 +7,7 @@ use std::env;
 use dotenv::dotenv;
 
 const SOCKS_VERSION: u8 = 0x05;
+const NO_AUTH: u8 = 0x00;
 const AUTH_USER_PASS: u8 = 0x02;
 const CMD_CONNECT: u8 = 0x01;
 const CMD_UDP_ASSOCIATE: u8 = 0x03;
@@ -21,7 +22,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let addr = "127.0.0.1:1080";
     let listener = TcpListener::bind(addr).await?;
-    println!("[*] SOCKS5 Proxy listening on {}", addr);
+
+    // Check auth status for logging
+    if env::var("SOCKS_USER").is_ok() && env::var("SOCKS_PASSWORD").is_ok() {
+        println!("[*] SOCKS5 Proxy listening on {} (Auth Enabled)", addr);
+    } else {
+        println!("[*] SOCKS5 Proxy listening on {} (OPEN PROXY - No Auth)", addr);
+    }
 
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -47,14 +54,26 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr) -> Result
     let mut methods = vec![0u8; nmethods as usize];
     stream.read_exact(&mut methods).await?;
 
-    if !methods.contains(&AUTH_USER_PASS) {
-        stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
-        return Err("Client does not support Username/Password authentication".into());
+    // Determine authentication mode based on environment variables
+    let has_user = env::var("SOCKS_USER").is_ok();
+    let has_pass = env::var("SOCKS_PASSWORD").is_ok();
+
+    if has_user && has_pass {
+        // Auth Mode
+        if !methods.contains(&AUTH_USER_PASS) {
+            stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+            return Err("Client does not support Username/Password authentication".into());
+        }
+        stream.write_all(&[SOCKS_VERSION, AUTH_USER_PASS]).await?;
+        authenticate(&mut stream).await?;
+    } else {
+        // No Auth Mode
+        if !methods.contains(&NO_AUTH) {
+            stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+            return Err("Client does not support No Authentication".into());
+        }
+        stream.write_all(&[SOCKS_VERSION, NO_AUTH]).await?;
     }
-
-    stream.write_all(&[SOCKS_VERSION, AUTH_USER_PASS]).await?;
-
-    authenticate(&mut stream).await?;
 
     let mut request_header = [0u8; 4];
     stream.read_exact(&mut request_header).await?;
@@ -102,8 +121,8 @@ async fn authenticate(stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
 
     println!("[*] Auth attempt: {} / ...", username);
 
-    let valid_user = env::var("SOCKS_USER").unwrap_or_else(|_| "admin".to_string());
-    let valid_pass = env::var("SOCKS_PASSWORD").unwrap_or_else(|_| "secret".to_string());
+    let valid_user = env::var("SOCKS_USER").unwrap_or_else(|_| "".to_string());
+    let valid_pass = env::var("SOCKS_PASSWORD").unwrap_or_else(|_| "".to_string());
 
     if username == valid_user && password == valid_pass {
         stream.write_all(&[0x01, 0x00]).await?;
