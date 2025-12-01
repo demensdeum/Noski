@@ -52,6 +52,12 @@ Noski uses a `.env` file to manage authentication credentials.
         SOCKS_USER=myuser
         SOCKS_PASSWORD=mypassword
 
+## No Authentication (Open Proxy)
+
+If you do not create a .env file, or if you omit the SOCKS_USER and SOCKS_PASSWORD variables, the server will default to No Authentication mode.
+
+Warning: In this mode, anyone who can access the server port can use the proxy.
+        
 ## Usage
 
 ### Running the Server
