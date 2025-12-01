@@ -1,4 +1,6 @@
 mod encryption;
+mod chacha20_encryption;
+mod encrypted_stream;
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,6 +10,8 @@ use std::sync::Arc;
 use std::env;
 use dotenv::dotenv;
 use encryption::{EncryptionLayer, PassthroughEncryption};
+use chacha20_encryption::ChaCha20Encryption;
+use encrypted_stream::{EncryptedReader, EncryptedWriter, copy_encrypted_to_plain, copy_plain_to_encrypted};
 
 const SOCKS_VERSION: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
@@ -26,8 +30,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = "127.0.0.1:1080";
     let listener = TcpListener::bind(addr).await?;
 
-    let encryption: Box<dyn EncryptionLayer> = Box::new(PassthroughEncryption::new());
+    let encryption_type = env::var("ENCRYPTION_TYPE").unwrap_or_else(|_| "chacha20".to_string());
+    
+    let encryption: Box<dyn EncryptionLayer> = match encryption_type.to_lowercase().as_str() {
+        "passthrough" | "none" | "disabled" => {
+            println!("[!] ENCRYPTION DISABLED - Using passthrough mode");
+            println!("[!] This mode is compatible with standard SOCKS5 clients");
+            println!("[!] WARNING: All traffic between client and proxy is UNENCRYPTED!");
+            Box::new(PassthroughEncryption::new())
+        }
+        "chacha20" | "chacha20-poly1305" | "encrypted" => {
+            match ChaCha20Encryption::from_env() {
+                Ok(enc) => {
+                    println!("[*] Loaded encryption key from ENCRYPTION_KEY environment variable");
+                    Box::new(enc)
+                }
+                Err(_) => {
+                    let key = ChaCha20Encryption::generate_key();
+                    let key_hex = hex::encode(&key);
+                    println!("[*] Generated new encryption key: {}", key_hex);
+                    println!("[!] Save this key to .env as: ENCRYPTION_KEY={}", key_hex);
+                    println!("[!] Clients must use the same key to connect!");
+                    Box::new(ChaCha20Encryption::new(&key))
+                }
+            }
+        }
+        _ => {
+            eprintln!("[!] Invalid ENCRYPTION_TYPE: '{}'. Valid options: passthrough, chacha20", encryption_type);
+            eprintln!("[!] Defaulting to chacha20");
+            match ChaCha20Encryption::from_env() {
+                Ok(enc) => Box::new(enc),
+                Err(_) => {
+                    let key = ChaCha20Encryption::generate_key();
+                    let key_hex = hex::encode(&key);
+                    println!("[*] Generated new encryption key: {}", key_hex);
+                    println!("[!] Save this key to .env as: ENCRYPTION_KEY={}", key_hex);
+                    Box::new(ChaCha20Encryption::new(&key))
+                }
+            }
+        }
+    };
     let encryption = Arc::new(encryption);
+    
     if env::var("SOCKS_USER").is_ok() && env::var("SOCKS_PASSWORD").is_ok() {
         println!("[*] SOCKS5 Proxy listening on {} (Auth Enabled)", addr);
     } else {
@@ -90,7 +134,7 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, _encrypti
     }
 
     match cmd {
-        CMD_CONNECT => handle_tcp(stream, atyp).await,
+        CMD_CONNECT => handle_tcp(stream, atyp, _encryption).await,
         CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr).await,
         _ => {
             send_reply(&mut stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
@@ -136,9 +180,17 @@ async fn authenticate(stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn handle_tcp(mut client_stream: TcpStream, atyp: u8) -> Result<(), Box<dyn Error>> {
-    let target_addr = read_addr_port(&mut client_stream, atyp).await?;
+async fn handle_tcp(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
+    if encryption.name() == "passthrough" {
+        handle_tcp_plain(client_stream, atyp).await
+    } else {
+        handle_tcp_encrypted(client_stream, atyp, encryption).await
+    }
+}
 
+async fn handle_tcp_plain(mut client_stream: TcpStream, atyp: u8) -> Result<(), Box<dyn Error>> {
+    let target_addr = read_addr_port(&mut client_stream, atyp).await?;
+    
     println!("[*] TCP Request to {}", target_addr);
 
     match TcpStream::connect(&target_addr).await {
@@ -166,6 +218,125 @@ async fn handle_tcp(mut client_stream: TcpStream, atyp: u8) -> Result<(), Box<dy
 
     Ok(())
 }
+
+async fn handle_tcp_encrypted(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
+    let (client_read, client_write) = client_stream.into_split();
+    
+    let mut encrypted_reader = EncryptedReader::new(client_read, Arc::clone(&encryption));
+    let mut encrypted_writer = EncryptedWriter::new(client_write, Arc::clone(&encryption));
+    
+    let mut addr_buf = Vec::new();
+    match atyp {
+        ATYP_IPV4 => {
+            let mut bytes = [0u8; 4];
+            encrypted_reader.read_encrypted(&mut bytes).await?;
+            addr_buf.extend_from_slice(&bytes);
+        },
+        ATYP_DOMAIN => {
+            let mut len_byte = [0u8; 1];
+            encrypted_reader.read_encrypted(&mut len_byte).await?;
+            let len = len_byte[0] as usize;
+            addr_buf.push(len_byte[0]);
+            let mut domain_bytes = vec![0u8; len];
+            encrypted_reader.read_encrypted(&mut domain_bytes).await?;
+            addr_buf.extend_from_slice(&domain_bytes);
+        },
+        ATYP_IPV6 => {
+            let mut bytes = [0u8; 16];
+            encrypted_reader.read_encrypted(&mut bytes).await?;
+            addr_buf.extend_from_slice(&bytes);
+        },
+        _ => return Err("Unknown address type".into()),
+    }
+    
+    let mut port_bytes = [0u8; 2];
+    encrypted_reader.read_encrypted(&mut port_bytes).await?;
+    addr_buf.extend_from_slice(&port_bytes);
+    
+    let target_addr = parse_target_addr(atyp, &addr_buf)?;
+    
+    println!("[*] TCP Request to {}", target_addr);
+
+    match TcpStream::connect(&target_addr).await {
+        Ok(target_stream) => {
+            let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+            let reply = build_reply(0x00, bind_addr);
+            encrypted_writer.write_encrypted(&reply).await?;
+
+            let (mut target_read, mut target_write) = target_stream.into_split();
+
+            let client_to_target = copy_encrypted_to_plain(&mut encrypted_reader, &mut target_write);
+            let target_to_client = copy_plain_to_encrypted(&mut target_read, &mut encrypted_writer);
+
+            tokio::select! {
+                _ = client_to_target => {},
+                _ = target_to_client => {},
+            }
+        }
+        Err(e) => {
+            eprintln!("[!] Failed to connect to target: {}", e);
+            let empty_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+            let reply = build_reply(0x01, empty_addr);
+            encrypted_writer.write_encrypted(&reply).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_target_addr(atyp: u8, data: &[u8]) -> Result<String, Box<dyn Error>> {
+    let mut offset = 0;
+    let host: String;
+
+    match atyp {
+        ATYP_IPV4 => {
+            if data.len() < 4 { return Err("Invalid IPv4 data".into()); }
+            let bytes: [u8; 4] = data[offset..offset+4].try_into()?;
+            host = Ipv4Addr::from(bytes).to_string();
+            offset += 4;
+        },
+        ATYP_DOMAIN => {
+            if data.is_empty() { return Err("Invalid domain data".into()); }
+            let len = data[0] as usize;
+            offset += 1;
+            if data.len() < offset + len { return Err("Invalid domain length".into()); }
+            host = String::from_utf8(data[offset..offset+len].to_vec())?;
+            offset += len;
+        },
+        ATYP_IPV6 => {
+            if data.len() < 16 { return Err("Invalid IPv6 data".into()); }
+            let bytes: [u8; 16] = data[offset..offset+16].try_into()?;
+            host = Ipv6Addr::from(bytes).to_string();
+            offset += 16;
+        },
+        _ => return Err("Unknown address type".into()),
+    }
+
+    if data.len() < offset + 2 { return Err("Missing port".into()); }
+    let port_bytes: [u8; 2] = data[offset..offset+2].try_into()?;
+    let port = u16::from_be_bytes(port_bytes);
+
+    Ok(format!("{}:{}", host, port))
+}
+
+fn build_reply(rep: u8, bind_addr: SocketAddr) -> Vec<u8> {
+    let mut response = vec![SOCKS_VERSION, rep, RSV];
+
+    match bind_addr.ip() {
+        IpAddr::V4(ip) => {
+            response.push(ATYP_IPV4);
+            response.extend_from_slice(&ip.octets());
+        },
+        IpAddr::V6(ip) => {
+            response.push(ATYP_IPV6);
+            response.extend_from_slice(&ip.octets());
+        }
+    }
+
+    response.extend_from_slice(&bind_addr.port().to_be_bytes());
+    response
+}
+
 
 async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
     let _ = read_addr_port(&mut client_stream, atyp).await?;

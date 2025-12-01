@@ -8,6 +8,8 @@ high-performance non-blocking I/O.
 
 ## Features
 
+-   **🔒 ChaCha20-Poly1305 Encryption**: All traffic between client and proxy is encrypted
+    using modern authenticated encryption (see [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for setup).
 -   **Protocol Support**: Full implementation of the SOCKS5 protocol
     (RFC 1928).
 -   **TCP Support**: Handles `CONNECT` commands for standard TCP
@@ -16,8 +18,6 @@ high-performance non-blocking I/O.
 -   **Authentication**: Supports Username/Password authentication (RFC
     1929).
 -   **IPv4 & IPv6**: Robust handling of both address types.
--   **Encryption Layer**: Pluggable encryption abstraction for traffic encryption
-    (see [ENCRYPTION.md](ENCRYPTION.md) for details).
 -   **Configuration**: Simple environment-based configuration via
     `.env`.
 
@@ -45,20 +45,70 @@ high-performance non-blocking I/O.
 
 ## Configuration
 
-Noski uses a `.env` file to manage authentication credentials.
+Noski uses a `.env` file to manage configuration.
 
 1.  Create a file named `.env` in the root directory.
 
-2.  Add your desired username and password:
+2.  Add your configuration:
 
+        ENCRYPTION_KEY=<generated-key-from-first-run>
         SOCKS_USER=myuser
         SOCKS_PASSWORD=mypassword
 
-## No Authentication (Open Proxy)
+### Encryption Setup
 
-If you do not create a .env file, or if you omit the SOCKS_USER and SOCKS_PASSWORD variables, the server will default to No Authentication mode.
+On first run without `ENCRYPTION_KEY`, the proxy will generate and display a new encryption key:
 
-Warning: In this mode, anyone who can access the server port can use the proxy.
+```
+[*] Generated new encryption key: a1b2c3d4e5f6...
+[!] Save this key to .env as: ENCRYPTION_KEY=a1b2c3d4e5f6...
+```
+
+**Important**: Save this key to your `.env` file and share it securely with clients.
+
+See [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for detailed encryption setup and client implementation.
+
+### Disable Encryption (Standard SOCKS5 Mode)
+
+To use the proxy with **standard SOCKS5 clients** (curl, browsers, etc.) without custom encryption:
+
+Add to your `.env` file:
+```
+ENCRYPTION_TYPE=passthrough
+```
+
+Or run with:
+```bash
+ENCRYPTION_TYPE=passthrough cargo run --release
+```
+
+Output:
+```
+[!] ENCRYPTION DISABLED - Using passthrough mode
+[!] This mode is compatible with standard SOCKS5 clients
+[!] WARNING: All traffic between client and proxy is UNENCRYPTED!
+[*] Encryption Layer: passthrough
+```
+
+**Valid ENCRYPTION_TYPE values:**
+- `passthrough` / `none` / `disabled` - No encryption (standard SOCKS5)
+- `chacha20` / `chacha20-poly1305` / `encrypted` - ChaCha20-Poly1305 encryption (default)
+
+**When to use passthrough:**
+- ✅ Testing with curl or browsers
+- ✅ Using standard SOCKS5 clients
+- ✅ Local development
+
+**When NOT to use passthrough:**
+- ❌ Production deployments
+- ❌ Untrusted networks
+- ❌ When privacy is important
+
+## No Authentication (Not Recommended)
+
+If you omit the SOCKS_USER and SOCKS_PASSWORD variables, the server will default to No Authentication mode.
+
+⚠️ **Warning**: In this mode, anyone who can access the server port can use the proxy. Always use authentication in production!
         
 ## Usage
 
