@@ -19,6 +19,13 @@ impl<R: AsyncRead + Unpin> EncryptedReader<R> {
     }
 
     pub async fn read_encrypted(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.buffer.is_empty() {
+            let copy_len = self.buffer.len().min(buf.len());
+            buf[..copy_len].copy_from_slice(&self.buffer[..copy_len]);
+            self.buffer.drain(..copy_len);
+            return Ok(copy_len);
+        }
+
         let mut len_bytes = [0u8; 4];
         self.inner.read_exact(&mut len_bytes).await?;
         let len = u32::from_be_bytes(len_bytes) as usize;
