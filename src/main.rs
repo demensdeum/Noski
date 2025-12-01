@@ -1,5 +1,6 @@
 mod encryption;
 mod chacha20_encryption;
+mod obfuscated_encryption;
 mod encrypted_stream;
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -11,6 +12,7 @@ use std::env;
 use dotenv::dotenv;
 use encryption::{EncryptionLayer, PassthroughEncryption};
 use chacha20_encryption::ChaCha20Encryption;
+use obfuscated_encryption::ObfuscatedEncryption;
 use encrypted_stream::{EncryptedReader, EncryptedWriter, copy_encrypted_to_plain, copy_plain_to_encrypted};
 
 const SOCKS_VERSION: u8 = 0x05;
@@ -55,8 +57,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        "obfuscated" | "dpi" | "tls" => {
+            match ObfuscatedEncryption::from_env() {
+                Ok(enc) => {
+                    println!("[*] Loaded encryption key from ENCRYPTION_KEY environment variable");
+                    println!("[*] Using obfuscated mode - DPI evasion enabled");
+                    println!("[*] Traffic will look like TLS/HTTPS");
+                    Box::new(enc)
+                }
+                Err(_) => {
+                    let key = ObfuscatedEncryption::generate_key();
+                    let key_hex = hex::encode(&key);
+                    println!("[*] Generated new encryption key: {}", key_hex);
+                    println!("[!] Save this key to .env as: ENCRYPTION_KEY={}", key_hex);
+                    println!("[!] Clients must use the same key to connect!");
+                    println!("[*] Using obfuscated mode - DPI evasion enabled");
+                    Box::new(ObfuscatedEncryption::new(&key))
+                }
+            }
+        }
         _ => {
-            eprintln!("[!] Invalid ENCRYPTION_TYPE: '{}'. Valid options: passthrough, chacha20", encryption_type);
+            eprintln!("[!] Invalid ENCRYPTION_TYPE: '{}'. Valid options: passthrough, chacha20, obfuscated", encryption_type);
             eprintln!("[!] Defaulting to chacha20");
             match ChaCha20Encryption::from_env() {
                 Ok(enc) => Box::new(enc),

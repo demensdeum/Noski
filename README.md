@@ -10,6 +10,8 @@ high-performance non-blocking I/O.
 
 -   **🔒 ChaCha20-Poly1305 Encryption**: All traffic between client and proxy is encrypted
     using modern authenticated encryption (see [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for setup).
+-   **🕵️ DPI Evasion Mode**: Obfuscated encryption that makes traffic look like HTTPS/TLS
+    to bypass Deep Packet Inspection (see [DPI_EVASION.md](DPI_EVASION.md) for details).
 -   **Protocol Support**: Full implementation of the SOCKS5 protocol
     (RFC 1928).
 -   **TCP Support**: Handles `CONNECT` commands for standard TCP
@@ -93,6 +95,7 @@ Output:
 **Valid ENCRYPTION_TYPE values:**
 - `passthrough` / `none` / `disabled` - No encryption (standard SOCKS5)
 - `chacha20` / `chacha20-poly1305` / `encrypted` - ChaCha20-Poly1305 encryption (default)
+- `obfuscated` / `dpi` / `tls` - Obfuscated encryption with DPI evasion (see [DPI_EVASION.md](DPI_EVASION.md))
 
 **When to use passthrough:**
 - ✅ Testing with curl or browsers
