@@ -1,3 +1,5 @@
+mod encryption;
+
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
@@ -5,6 +7,7 @@ use std::error::Error;
 use std::sync::Arc;
 use std::env;
 use dotenv::dotenv;
+use encryption::{EncryptionLayer, PassthroughEncryption};
 
 const SOCKS_VERSION: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
@@ -23,26 +26,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = "127.0.0.1:1080";
     let listener = TcpListener::bind(addr).await?;
 
-    // Check auth status for logging
+    let encryption: Box<dyn EncryptionLayer> = Box::new(PassthroughEncryption::new());
+    let encryption = Arc::new(encryption);
     if env::var("SOCKS_USER").is_ok() && env::var("SOCKS_PASSWORD").is_ok() {
         println!("[*] SOCKS5 Proxy listening on {} (Auth Enabled)", addr);
     } else {
         println!("[*] SOCKS5 Proxy listening on {} (OPEN PROXY - No Auth)", addr);
     }
+    println!("[*] Encryption Layer: {}", encryption.name());
 
     loop {
         let (stream, addr) = listener.accept().await?;
         println!("[+] Accepted connection from {}", addr);
 
+        let encryption = Arc::clone(&encryption);
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, addr).await {
+            if let Err(e) = handle_client(stream, addr, encryption).await {
                 eprintln!("[!] Error handling client {}: {}", addr, e);
             }
         });
     }
 }
 
-async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, _encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).await?;
 
@@ -54,12 +60,10 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr) -> Result
     let mut methods = vec![0u8; nmethods as usize];
     stream.read_exact(&mut methods).await?;
 
-    // Determine authentication mode based on environment variables
     let has_user = env::var("SOCKS_USER").is_ok();
     let has_pass = env::var("SOCKS_PASSWORD").is_ok();
 
     if has_user && has_pass {
-        // Auth Mode
         if !methods.contains(&AUTH_USER_PASS) {
             stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
             return Err("Client does not support Username/Password authentication".into());
@@ -67,7 +71,6 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr) -> Result
         stream.write_all(&[SOCKS_VERSION, AUTH_USER_PASS]).await?;
         authenticate(&mut stream).await?;
     } else {
-        // No Auth Mode
         if !methods.contains(&NO_AUTH) {
             stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
             return Err("Client does not support No Authentication".into());

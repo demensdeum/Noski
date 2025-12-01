@@ -16,6 +16,8 @@ high-performance non-blocking I/O.
 -   **Authentication**: Supports Username/Password authentication (RFC
     1929).
 -   **IPv4 & IPv6**: Robust handling of both address types.
+-   **Encryption Layer**: Pluggable encryption abstraction for traffic encryption
+    (see [ENCRYPTION.md](ENCRYPTION.md) for details).
 -   **Configuration**: Simple environment-based configuration via
     `.env`.
 
@@ -103,10 +105,13 @@ settings.
 ## Project Structure
 
     Noski/
-    ├── Cargo.toml      # Rust dependencies and package info
-    ├── .env            # Environment variables for credentials
+    ├── Cargo.toml                      # Rust dependencies and package info
+    ├── .env                            # Environment variables for credentials
+    ├── ENCRYPTION.md                   # Encryption layer documentation
     └── src/
-        └── main.rs     # Main entry point and server logic
+        ├── main.rs                     # Main entry point and server logic
+        ├── encryption.rs               # Encryption layer abstraction
+        └── xor_encryption_example.rs   # Example encryption implementation
 
 ## License
 
