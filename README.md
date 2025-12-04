@@ -1,6 +1,6 @@
 # Noski - SOCKS5 Proxy Server in Rust
 
-![Logo](logo.png "Logo")
+![Logo](logo.jpg "Logo")
 
 Noski is a lightweight, asynchronous SOCKS5 proxy server implementation
 written in Rust. It is built using the tokio runtime for
@@ -106,6 +106,17 @@ Output:
 - ❌ Production deployments
 - ❌ Untrusted networks
 - ❌ When privacy is important
+
+## Client Application (Pyatki)
+
+**Pyatki** is the official client for Noski. It runs locally and provides a standard SOCKS5 interface for your applications while handling encryption to the remote Noski server.
+
+See [CLIENT_GUIDE.md](CLIENT_GUIDE.md) for build and usage instructions.
+
+```bash
+# Quick build
+cargo build --release --bin pyatki
+```
 
 ## No Authentication (Not Recommended)
 
