@@ -29,8 +29,11 @@ const RSV: u8 = 0x00;
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
 
-    let addr = "127.0.0.1:1080";
-    let listener = TcpListener::bind(addr).await?;
+    let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = env::var("PORT").unwrap_or_else(|_| "1080".to_string());
+
+    let addr = format!("{}:{}", host, port);
+    let listener = TcpListener::bind(&addr).await?;
 
     let encryption_type = env::var("ENCRYPTION_TYPE").unwrap_or_else(|_| "chacha20".to_string());
     
