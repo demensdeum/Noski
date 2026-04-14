@@ -12,11 +12,16 @@ use noski::encrypted_stream::{EncryptedReader, EncryptedWriter, copy_encrypted_t
 
 const SOCKS_VERSION: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
+const USERNAME_PASSWORD_AUTH: u8 = 0x02;
 const CMD_CONNECT: u8 = 0x01;
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
 const RSV: u8 = 0x00;
+
+const AUTH_VERSION: u8 = 0x01;
+const AUTH_SUCCESS: u8 = 0x00;
+const AUTH_FAILURE: u8 = 0x01;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,6 +29,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let local_addr = env::var("PYATKI_LOCAL_ADDR").unwrap_or_else(|_| "127.0.0.1:1081".to_string());
     let remote_addr = env::var("NOSKI_REMOTE_ADDR").expect("NOSKI_REMOTE_ADDR must be set in .env");
+    
+    let socks_user = env::var("SOCKS_USER").ok();
+    let socks_password = env::var("SOCKS_PASSWORD").ok();
+    let require_auth = socks_user.is_some() && socks_password.is_some();
+    
+    if require_auth {
+        println!("[*] SOCKS5 authentication enabled");
+    } else {
+        println!("[*] SOCKS5 authentication disabled");
+    }
     
     let listener = TcpListener::bind(&local_addr).await?;
     println!("[*] Pyatki SOCKS5 Client listening on {}", local_addr);
@@ -75,16 +90,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let encryption = Arc::clone(&encryption);
         let remote_addr = remote_addr_str.clone();
+        let socks_user_for_task = socks_user.clone();
+        let socks_password_for_task = socks_password.clone();
         
         tokio::spawn(async move {
-            if let Err(e) = handle_local_client(stream, remote_addr, encryption).await {
+            if let Err(e) = handle_local_client(
+                stream,
+                remote_addr,
+                encryption,
+                socks_user_for_task,
+                socks_password_for_task,
+            ).await {
                 eprintln!("[!] Error handling client {}: {}", addr, e);
             }
         });
     }
 }
 
-async fn handle_local_client(mut client_stream: TcpStream, remote_addr: String, encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
+async fn handle_local_client(
+    mut client_stream: TcpStream, 
+    remote_addr: String, 
+    encryption: Arc<Box<dyn EncryptionLayer>>,
+    socks_user: Option<String>,
+    socks_password: Option<String>
+) -> Result<(), Box<dyn Error>> {
     // 1. Handshake with Local Client
     let mut header = [0u8; 2];
     client_stream.read_exact(&mut header).await?;
@@ -97,12 +126,66 @@ async fn handle_local_client(mut client_stream: TcpStream, remote_addr: String, 
     let mut methods = vec![0u8; nmethods as usize];
     client_stream.read_exact(&mut methods).await?;
 
-    // We only support NO AUTH for local clients for simplicity
-    if !methods.contains(&NO_AUTH) {
-        client_stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
-        return Err("Client does not support No Authentication".into());
+    // Determine which authentication method to use
+    let selected_method = if socks_user.is_some() && socks_password.is_some() {
+        // If credentials are configured, prefer username/password auth
+        if methods.contains(&USERNAME_PASSWORD_AUTH) {
+            USERNAME_PASSWORD_AUTH
+        } else if methods.contains(&NO_AUTH) {
+            NO_AUTH
+        } else {
+            client_stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+            return Err("Client does not support any supported authentication method".into());
+        }
+    } else {
+        // No credentials configured, use NO_AUTH if available
+        if methods.contains(&NO_AUTH) {
+            NO_AUTH
+        } else {
+            client_stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+            return Err("Client does not support No Authentication".into());
+        }
+    };
+    
+    client_stream.write_all(&[SOCKS_VERSION, selected_method]).await?;
+    
+    // If username/password authentication is selected, perform it
+    if selected_method == USERNAME_PASSWORD_AUTH {
+        let mut auth_header = [0u8; 2];
+        client_stream.read_exact(&mut auth_header).await?;
+        
+        if auth_header[0] != AUTH_VERSION {
+            return Err("Invalid authentication subnegotiation version".into());
+        }
+        
+        let username_len = auth_header[1] as usize;
+        let mut username_bytes = vec![0u8; username_len];
+        client_stream.read_exact(&mut username_bytes).await?;
+        
+        let mut password_len_byte = [0u8; 1];
+        client_stream.read_exact(&mut password_len_byte).await?;
+        let password_len = password_len_byte[0] as usize;
+        let mut password_bytes = vec![0u8; password_len];
+        client_stream.read_exact(&mut password_bytes).await?;
+        
+        let username = String::from_utf8_lossy(&username_bytes);
+        let password = String::from_utf8_lossy(&password_bytes);
+        
+        // Verify credentials
+        if let (Some(ref expected_user), Some(ref expected_password)) = (&socks_user, &socks_password) {
+            if username.as_ref() == expected_user.as_str() && password.as_ref() == expected_password.as_str() {
+                client_stream.write_all(&[AUTH_VERSION, AUTH_SUCCESS]).await?;
+                println!("[+] SOCKS5 authentication successful for user: {}", username);
+            } else {
+                client_stream.write_all(&[AUTH_VERSION, AUTH_FAILURE]).await?;
+                eprintln!("[!] SOCKS5 authentication failed for user: {}", username);
+                return Err("Authentication failed".into());
+            }
+        } else {
+            client_stream.write_all(&[AUTH_VERSION, AUTH_FAILURE]).await?;
+            return Err("Server authentication configuration error".into());
+        }
     }
-    client_stream.write_all(&[SOCKS_VERSION, NO_AUTH]).await?;
 
     // 2. Read Request from Local Client
     let mut request_header = [0u8; 4];
@@ -127,17 +210,51 @@ async fn handle_local_client(mut client_stream: TcpStream, remote_addr: String, 
     let mut remote_stream = TcpStream::connect(&remote_addr).await?;
     
     // 4. Handshake with Remote Noski Server
-    // Send Init
-    remote_stream.write_all(&[SOCKS_VERSION, 1, NO_AUTH]).await?;
+    // Send Init (advertise supported methods)
+    // If credentials are configured, allow username/password auth as well.
+    if socks_user.is_some() && socks_password.is_some() {
+        remote_stream
+            .write_all(&[SOCKS_VERSION, 2, NO_AUTH, USERNAME_PASSWORD_AUTH])
+            .await?;
+    } else {
+        remote_stream.write_all(&[SOCKS_VERSION, 1, NO_AUTH]).await?;
+    }
     
     // Read Init Reply
     let mut remote_header = [0u8; 2];
     remote_stream.read_exact(&mut remote_header).await?;
-    if remote_header[0] != SOCKS_VERSION || remote_header[1] != NO_AUTH {
-        // Try Auth? For now assume Noski is configured with NO_AUTH or we need to implement auth
-        // The user didn't specify auth requirements for pyatki -> noski, but noski supports it.
-        // Let's assume NO_AUTH for now as per the prompt "work as local socks server".
-        return Err("Remote server refused NO_AUTH".into());
+    if remote_header[0] != SOCKS_VERSION {
+        return Err("Remote server invalid SOCKS version".into());
+    }
+
+    match remote_header[1] {
+        NO_AUTH => {}
+        USERNAME_PASSWORD_AUTH => {
+            let (user, pass) = match (&socks_user, &socks_password) {
+                (Some(u), Some(p)) => (u, p),
+                _ => return Err("Remote server requires auth but SOCKS_USER/SOCKS_PASSWORD are not set".into()),
+            };
+
+            if user.len() > 255 || pass.len() > 255 {
+                return Err("SOCKS_USER/SOCKS_PASSWORD must be <= 255 bytes".into());
+            }
+
+            let mut auth_req = Vec::with_capacity(3 + user.len() + pass.len());
+            auth_req.push(AUTH_VERSION);
+            auth_req.push(user.len() as u8);
+            auth_req.extend_from_slice(user.as_bytes());
+            auth_req.push(pass.len() as u8);
+            auth_req.extend_from_slice(pass.as_bytes());
+            remote_stream.write_all(&auth_req).await?;
+
+            let mut auth_resp = [0u8; 2];
+            remote_stream.read_exact(&mut auth_resp).await?;
+            if auth_resp[0] != AUTH_VERSION || auth_resp[1] != AUTH_SUCCESS {
+                return Err("Remote server authentication failed".into());
+            }
+        }
+        0xFF => return Err("Remote server rejected all authentication methods".into()),
+        other => return Err(format!("Remote server selected unsupported auth method: {}", other).into()),
     }
 
     // 5. Send Request Header to Remote (Plaintext)
