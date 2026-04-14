@@ -1,4 +1,4 @@
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::error::Error;
@@ -14,6 +14,7 @@ const SOCKS_VERSION: u8 = 0x05;
 const NO_AUTH: u8 = 0x00;
 const USERNAME_PASSWORD_AUTH: u8 = 0x02;
 const CMD_CONNECT: u8 = 0x01;
+const CMD_UDP_ASSOCIATE: u8 = 0x03;
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
@@ -199,19 +200,72 @@ async fn handle_local_client(
         return Err("Invalid SOCKS version in request".into());
     }
 
-    if cmd != CMD_CONNECT {
-        return Err(format!("Unsupported command: {}", cmd).into());
+    match cmd {
+        CMD_CONNECT => {
+            // Read target address from local client
+            let (target_addr_bytes, _target_port) = read_addr_bytes(&mut client_stream, atyp).await?;
+
+            // 3. Connect to Remote Noski Server
+            let mut remote_stream = TcpStream::connect(&remote_addr).await?;
+            remote_socks5_handshake(&mut remote_stream, &socks_user, &socks_password).await?;
+
+            // 5. Send Request Header to Remote (Plaintext)
+            // We forward the same ATYP
+            remote_stream.write_all(&[SOCKS_VERSION, CMD_CONNECT, RSV, atyp]).await?;
+
+            // 6. Setup Encryption
+            let (remote_read, remote_write) = remote_stream.into_split();
+            let mut encrypted_writer = EncryptedWriter::new(remote_write, Arc::clone(&encryption));
+            let mut encrypted_reader = EncryptedReader::new(remote_read, Arc::clone(&encryption));
+
+            // 7. Send Encrypted Target Address
+            encrypted_writer.write_encrypted(&target_addr_bytes).await?;
+
+            // 8. Read Encrypted Reply from Remote
+            let mut reply_buf = [0u8; 1024];
+            let n = encrypted_reader.read_encrypted(&mut reply_buf).await?;
+            if n == 0 {
+                return Err("Remote server closed connection during handshake".into());
+            }
+            let reply_bytes = &reply_buf[..n];
+            
+            // 9. Forward Reply to Local Client (Plaintext)
+            client_stream.write_all(&reply_bytes).await?;
+
+            // Check if reply indicates success (REP = 0x00)
+            if reply_bytes.len() < 2 || reply_bytes[1] != 0x00 {
+                return Err("Remote server returned error".into());
+            }
+
+            // 10. Relay Loop
+            let (mut client_read, mut client_write) = client_stream.into_split();
+
+            let client_to_remote = copy_plain_to_encrypted(&mut client_read, &mut encrypted_writer);
+            let remote_to_client = copy_encrypted_to_plain(&mut encrypted_reader, &mut client_write);
+
+            tokio::select! {
+                _ = client_to_remote => {},
+                _ = remote_to_client => {},
+            }
+
+            Ok(())
+        }
+        CMD_UDP_ASSOCIATE => {
+            handle_udp_associate(client_stream, atyp, remote_addr, socks_user, socks_password).await
+        }
+        _ => {
+            send_reply(&mut client_stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
+            Err(format!("Unsupported command: {}", cmd).into())
+        }
     }
+}
 
-    // Read target address from local client
-    let (target_addr_bytes, _target_port) = read_addr_bytes(&mut client_stream, atyp).await?;
-
-    // 3. Connect to Remote Noski Server
-    let mut remote_stream = TcpStream::connect(&remote_addr).await?;
-    
-    // 4. Handshake with Remote Noski Server
+async fn remote_socks5_handshake(
+    remote_stream: &mut TcpStream,
+    socks_user: &Option<String>,
+    socks_password: &Option<String>,
+) -> Result<(), Box<dyn Error>> {
     // Send Init (advertise supported methods)
-    // If credentials are configured, allow username/password auth as well.
     if socks_user.is_some() && socks_password.is_some() {
         remote_stream
             .write_all(&[SOCKS_VERSION, 2, NO_AUTH, USERNAME_PASSWORD_AUTH])
@@ -219,7 +273,7 @@ async fn handle_local_client(
     } else {
         remote_stream.write_all(&[SOCKS_VERSION, 1, NO_AUTH]).await?;
     }
-    
+
     // Read Init Reply
     let mut remote_header = [0u8; 2];
     remote_stream.read_exact(&mut remote_header).await?;
@@ -228,9 +282,9 @@ async fn handle_local_client(
     }
 
     match remote_header[1] {
-        NO_AUTH => {}
+        NO_AUTH => Ok(()),
         USERNAME_PASSWORD_AUTH => {
-            let (user, pass) = match (&socks_user, &socks_password) {
+            let (user, pass) = match (socks_user, socks_password) {
                 (Some(u), Some(p)) => (u, p),
                 _ => return Err("Remote server requires auth but SOCKS_USER/SOCKS_PASSWORD are not set".into()),
             };
@@ -252,50 +306,146 @@ async fn handle_local_client(
             if auth_resp[0] != AUTH_VERSION || auth_resp[1] != AUTH_SUCCESS {
                 return Err("Remote server authentication failed".into());
             }
+            Ok(())
         }
-        0xFF => return Err("Remote server rejected all authentication methods".into()),
-        other => return Err(format!("Remote server selected unsupported auth method: {}", other).into()),
+        0xFF => Err("Remote server rejected all authentication methods".into()),
+        other => Err(format!("Remote server selected unsupported auth method: {}", other).into()),
+    }
+}
+
+async fn handle_udp_associate(
+    mut client_stream: TcpStream,
+    atyp: u8,
+    remote_addr: String,
+    socks_user: Option<String>,
+    socks_password: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    // Read and ignore the client-provided address/port for UDP associate
+    // (clients often send 0.0.0.0:0)
+    let (client_addr_bytes, _client_port) = read_addr_bytes(&mut client_stream, atyp).await?;
+
+    // Connect TCP control channel to remote server and perform method negotiation/auth
+    let mut remote_stream = TcpStream::connect(&remote_addr).await?;
+    remote_socks5_handshake(&mut remote_stream, &socks_user, &socks_password).await?;
+
+    // Send UDP ASSOCIATE to remote (plaintext)
+    remote_stream.write_all(&[SOCKS_VERSION, CMD_UDP_ASSOCIATE, RSV, atyp]).await?;
+    // Forward the same DST.ADDR/DST.PORT bytes the local client sent
+    remote_stream.write_all(&client_addr_bytes).await?;
+
+    let (rep, remote_udp_relay) = read_socks5_reply(&mut remote_stream).await?;
+    if rep != 0x00 {
+        send_reply(&mut client_stream, rep, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
+        return Err("Remote server rejected UDP associate".into());
     }
 
-    // 5. Send Request Header to Remote (Plaintext)
-    // We forward the same ATYP
-    remote_stream.write_all(&[SOCKS_VERSION, CMD_CONNECT, RSV, atyp]).await?;
+    // Allocate local UDP socket for the local client to send UDP packets to
+    let local_ip = client_stream.local_addr()?.ip();
+    let udp_socket = UdpSocket::bind(SocketAddr::new(local_ip, 0)).await?;
+    let local_udp_addr = udp_socket.local_addr()?;
+    let local_udp_addr = SocketAddr::new(local_ip, local_udp_addr.port());
 
-    // 6. Setup Encryption
-    let (remote_read, remote_write) = remote_stream.into_split();
-    let mut encrypted_writer = EncryptedWriter::new(remote_write, Arc::clone(&encryption));
-    let mut encrypted_reader = EncryptedReader::new(remote_read, Arc::clone(&encryption));
+    // Tell local client where to send UDP packets
+    send_reply(&mut client_stream, 0x00, local_udp_addr).await?;
 
-    // 7. Send Encrypted Target Address
-    encrypted_writer.write_encrypted(&target_addr_bytes).await?;
+    let udp_socket = Arc::new(udp_socket);
+    let mut buf = [0u8; 65535];
+    let mut tcp_buf = [0u8; 1];
+    let mut known_client_udp: Option<SocketAddr> = None;
 
-    // 8. Read Encrypted Reply from Remote
-    let mut reply_buf = [0u8; 1024];
-    let n = encrypted_reader.read_encrypted(&mut reply_buf).await?;
-    if n == 0 {
-        return Err("Remote server closed connection during handshake".into());
+    loop {
+        tokio::select! {
+            res = client_stream.read(&mut tcp_buf) => {
+                if res.unwrap_or(0) == 0 {
+                    break;
+                }
+            }
+            res = udp_socket.recv_from(&mut buf) => {
+                match res {
+                    Ok((size, src_addr)) => {
+                        let data = &buf[..size];
+
+                        if known_client_udp.is_none() {
+                            known_client_udp = Some(src_addr);
+                        }
+
+                        // Local client -> remote relay
+                        if Some(src_addr) == known_client_udp {
+                            let _ = udp_socket.send_to(data, remote_udp_relay).await;
+                        } else if src_addr == remote_udp_relay {
+                            // Remote relay -> local client
+                            if let Some(client_udp) = known_client_udp {
+                                let _ = udp_socket.send_to(data, client_udp).await;
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[!] UDP Recv Error: {}", e),
+                }
+            }
+        }
     }
-    let reply_bytes = &reply_buf[..n];
-    
-    // 9. Forward Reply to Local Client (Plaintext)
-    client_stream.write_all(&reply_bytes).await?;
 
-    // Check if reply indicates success (REP = 0x00)
-    if reply_bytes.len() < 2 || reply_bytes[1] != 0x00 {
-        return Err("Remote server returned error".into());
+    Ok(())
+}
+
+async fn read_socks5_reply(stream: &mut TcpStream) -> Result<(u8, SocketAddr), Box<dyn Error>> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await?;
+    if header[0] != SOCKS_VERSION {
+        return Err("Invalid SOCKS version in reply".into());
+    }
+    let rep = header[1];
+    let atyp = header[3];
+
+    let ip = match atyp {
+        ATYP_IPV4 => {
+            let mut bytes = [0u8; 4];
+            stream.read_exact(&mut bytes).await?;
+            IpAddr::V4(Ipv4Addr::from(bytes))
+        }
+        ATYP_IPV6 => {
+            let mut bytes = [0u8; 16];
+            stream.read_exact(&mut bytes).await?;
+            IpAddr::V6(Ipv6Addr::from(bytes))
+        }
+        ATYP_DOMAIN => {
+            let mut len_byte = [0u8; 1];
+            stream.read_exact(&mut len_byte).await?;
+            let len = len_byte[0] as usize;
+            let mut domain_bytes = vec![0u8; len];
+            stream.read_exact(&mut domain_bytes).await?;
+            let domain = String::from_utf8(domain_bytes)?;
+            // Domain in BND.ADDR is unusual; map to 0.0.0.0 as a fallback.
+            // (We only need the port to know where to send UDP packets, and server typically returns an IP.)
+            let _ = domain;
+            IpAddr::V4(Ipv4Addr::new(0,0,0,0))
+        }
+        _ => return Err("Unknown ATYP in reply".into()),
+    };
+
+    let mut port_bytes = [0u8; 2];
+    stream.read_exact(&mut port_bytes).await?;
+    let port = u16::from_be_bytes(port_bytes);
+
+    Ok((rep, SocketAddr::new(ip, port)))
+}
+
+async fn send_reply(stream: &mut TcpStream, rep: u8, bind_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+    let mut response = vec![SOCKS_VERSION, rep, RSV];
+
+    match bind_addr.ip() {
+        IpAddr::V4(ip) => {
+            response.push(ATYP_IPV4);
+            response.extend_from_slice(&ip.octets());
+        },
+        IpAddr::V6(ip) => {
+            response.push(ATYP_IPV6);
+            response.extend_from_slice(&ip.octets());
+        }
     }
 
-    // 10. Relay Loop
-    let (mut client_read, mut client_write) = client_stream.into_split();
-
-    let client_to_remote = copy_plain_to_encrypted(&mut client_read, &mut encrypted_writer);
-    let remote_to_client = copy_encrypted_to_plain(&mut encrypted_reader, &mut client_write);
-
-    tokio::select! {
-        _ = client_to_remote => {},
-        _ = remote_to_client => {},
-    }
-
+    response.extend_from_slice(&bind_addr.port().to_be_bytes());
+    stream.write_all(&response).await?;
     Ok(())
 }
 
