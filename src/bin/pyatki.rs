@@ -211,8 +211,13 @@ async fn handle_local_client(
             let is_passthrough = encryption.name() == "passthrough";
 
             if !is_passthrough {
+                let max_message_size = std::env::var("MESSAGE_SIZE")
+                    .unwrap_or_default()
+                    .parse::<usize>()
+                    .unwrap_or(1024 * 1024);
+
                 let (read_half, write_half) = remote_stream.into_split();
-                let mut r = EncryptedReader::new(read_half, Arc::clone(&encryption));
+                let mut r = EncryptedReader::new(read_half, Arc::clone(&encryption), max_message_size);
                 let mut w = EncryptedWriter::new(write_half, Arc::clone(&encryption));
 
                 // Perform handshake over the encrypted stream

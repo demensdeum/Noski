@@ -7,14 +7,16 @@ pub struct EncryptedReader<R> {
     inner: R,
     encryption: Arc<Box<dyn EncryptionLayer>>,
     buffer: Vec<u8>,
+    max_message_size: usize,
 }
 
 impl<R: AsyncRead + Unpin> EncryptedReader<R> {
-    pub fn new(inner: R, encryption: Arc<Box<dyn EncryptionLayer>>) -> Self {
+    pub fn new(inner: R, encryption: Arc<Box<dyn EncryptionLayer>>, max_message_size: usize) -> Self {
         Self {
             inner,
             encryption,
             buffer: Vec::new(),
+            max_message_size,
         }
     }
 
@@ -30,8 +32,13 @@ impl<R: AsyncRead + Unpin> EncryptedReader<R> {
         self.inner.read_exact(&mut len_bytes).await?;
         let len = u32::from_be_bytes(len_bytes) as usize;
 
-        if len > 1024 * 1024 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Message too large"));
+        if len > self.max_message_size {
+            let error_msg = if len_bytes[0] == 0x05 {
+                "Message too large (Plaintext SOCKS5 protocol detected on encrypted port)"
+            } else {
+                "Message too large"
+            };
+            return Err(io::Error::new(io::ErrorKind::InvalidData, error_msg));
         }
 
         let mut encrypted_data = vec![0u8; len];

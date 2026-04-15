@@ -214,8 +214,13 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, encryptio
         }
     } else {
         // Encrypted/Obfuscated mode - encryption-first handshake
+        let max_message_size = std::env::var("MESSAGE_SIZE")
+            .unwrap_or_default()
+            .parse::<usize>()
+            .unwrap_or(1024 * 1024);
+
         let (read_half, write_half) = stream.into_split();
-        let mut reader = EncryptedReader::new(read_half, Arc::clone(&encryption));
+        let mut reader = EncryptedReader::new(read_half, Arc::clone(&encryption), max_message_size);
         let mut writer = EncryptedWriter::new(write_half, Arc::clone(&encryption));
 
         let mut header = [0u8; 2];
@@ -486,9 +491,14 @@ async fn handle_tcp_encrypted_pre_initialized(
 }
 
 async fn handle_tcp_encrypted(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
+    let max_message_size = std::env::var("MESSAGE_SIZE")
+        .unwrap_or_default()
+        .parse::<usize>()
+        .unwrap_or(1024 * 1024);
+
     let (client_read, client_write) = client_stream.into_split();
     
-    let mut encrypted_reader = EncryptedReader::new(client_read, Arc::clone(&encryption));
+    let mut encrypted_reader = EncryptedReader::new(client_read, Arc::clone(&encryption), max_message_size);
     let mut encrypted_writer = EncryptedWriter::new(client_write, Arc::clone(&encryption));
     
     let mut addr_buf = Vec::new();
