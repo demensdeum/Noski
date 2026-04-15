@@ -161,54 +161,157 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, _encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
-    let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await?;
+async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
+    if encryption.name() == "passthrough" {
+        // In passthrough mode, we use the raw stream
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await?;
 
-    if header[0] != SOCKS_VERSION {
-        return Err("Invalid SOCKS version".into());
-    }
-
-    let nmethods = header[1];
-    let mut methods = vec![0u8; nmethods as usize];
-    stream.read_exact(&mut methods).await?;
-
-    let has_user = env::var("SOCKS_USER").is_ok();
-    let has_pass = env::var("SOCKS_PASSWORD").is_ok();
-
-    if has_user && has_pass {
-        if !methods.contains(&AUTH_USER_PASS) {
-            stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
-            return Err("Client does not support Username/Password authentication".into());
+        if header[0] != SOCKS_VERSION {
+            return Err("Invalid SOCKS version".into());
         }
-        stream.write_all(&[SOCKS_VERSION, AUTH_USER_PASS]).await?;
-        authenticate(&mut stream).await?;
+
+        let nmethods = header[1];
+        let mut methods = vec![0u8; nmethods as usize];
+        stream.read_exact(&mut methods).await?;
+
+        let has_user = env::var("SOCKS_USER").is_ok();
+        let has_pass = env::var("SOCKS_PASSWORD").is_ok();
+
+        if has_user && has_pass {
+            if !methods.contains(&AUTH_USER_PASS) {
+                stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+                return Err("Client does not support Username/Password authentication".into());
+            }
+            stream.write_all(&[SOCKS_VERSION, AUTH_USER_PASS]).await?;
+            authenticate(&mut stream).await?;
+        } else {
+            if !methods.contains(&NO_AUTH) {
+                stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
+                return Err("Client does not support No Authentication".into());
+            }
+            stream.write_all(&[SOCKS_VERSION, NO_AUTH]).await?;
+        }
+
+        let mut request_header = [0u8; 4];
+        stream.read_exact(&mut request_header).await?;
+
+        let ver = request_header[0];
+        let cmd = request_header[1];
+        let atyp = request_header[3];
+
+        if ver != SOCKS_VERSION {
+            return Err("Invalid SOCKS version in request".into());
+        }
+
+        match cmd {
+            CMD_CONNECT => handle_tcp(stream, atyp, encryption, logger).await,
+            CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr, logger).await,
+            _ => {
+                send_reply(&mut stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
+                Err(format!("Unsupported command: {}", cmd).into())
+            }
+        }
     } else {
-        if !methods.contains(&NO_AUTH) {
-            stream.write_all(&[SOCKS_VERSION, 0xFF]).await?;
-            return Err("Client does not support No Authentication".into());
+        // Encrypted/Obfuscated mode - encryption-first handshake
+        let (read_half, write_half) = stream.into_split();
+        let mut reader = EncryptedReader::new(read_half, Arc::clone(&encryption));
+        let mut writer = EncryptedWriter::new(write_half, Arc::clone(&encryption));
+
+        let mut header = [0u8; 2];
+        reader.read_encrypted(&mut header).await?;
+
+        if header[0] != SOCKS_VERSION {
+            return Err("Invalid SOCKS version".into());
         }
-        stream.write_all(&[SOCKS_VERSION, NO_AUTH]).await?;
+
+        let nmethods = header[1];
+        let mut methods = vec![0u8; nmethods as usize];
+        reader.read_encrypted(&mut methods).await?;
+
+        let has_user = env::var("SOCKS_USER").is_ok();
+        let has_pass = env::var("SOCKS_PASSWORD").is_ok();
+
+        if has_user && has_pass {
+            if !methods.contains(&AUTH_USER_PASS) {
+                writer.write_encrypted(&[SOCKS_VERSION, 0xFF]).await?;
+                return Err("Client does not support Username/Password authentication".into());
+            }
+            writer.write_encrypted(&[SOCKS_VERSION, AUTH_USER_PASS]).await?;
+            authenticate_encrypted(&mut reader, &mut writer).await?;
+        } else {
+            if !methods.contains(&NO_AUTH) {
+                writer.write_encrypted(&[SOCKS_VERSION, 0xFF]).await?;
+                return Err("Client does not support No Authentication".into());
+            }
+            writer.write_encrypted(&[SOCKS_VERSION, NO_AUTH]).await?;
+        }
+
+        let mut request_header = [0u8; 4];
+        reader.read_encrypted(&mut request_header).await?;
+
+        let ver = request_header[0];
+        let cmd = request_header[1];
+        let atyp = request_header[3];
+
+        if ver != SOCKS_VERSION {
+            return Err("Invalid SOCKS version in request".into());
+        }
+
+        match cmd {
+            CMD_CONNECT => {
+                handle_tcp_encrypted_pre_initialized(atyp, reader, writer, encryption, logger).await
+            },
+            CMD_UDP_ASSOCIATE => {
+                let s = reader.into_inner().reunite(writer.into_inner())?;
+                handle_udp(s, atyp, client_addr, logger).await
+            },
+            _ => {
+                let resp = build_reply(0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0));
+                writer.write_encrypted(&resp).await?;
+                Err(format!("Unsupported command: {}", cmd).into())
+            }
+        }
+    }
+}
+
+async fn authenticate_encrypted<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
+    reader: &mut EncryptedReader<R>,
+    writer: &mut EncryptedWriter<W>,
+) -> Result<(), Box<dyn Error>> {
+    let mut auth_header = [0u8; 2];
+    reader.read_encrypted(&mut auth_header).await?;
+
+    let ver = auth_header[0];
+    let ulen = auth_header[1];
+
+    if ver != 0x01 {
+        return Err("Unsupported auth protocol version".into());
     }
 
-    let mut request_header = [0u8; 4];
-    stream.read_exact(&mut request_header).await?;
+    let mut username_bytes = vec![0u8; ulen as usize];
+    reader.read_encrypted(&mut username_bytes).await?;
+    let username = String::from_utf8_lossy(&username_bytes);
 
-    let ver = request_header[0];
-    let cmd = request_header[1];
-    let atyp = request_header[3];
+    let mut plen_byte = [0u8; 1];
+    reader.read_encrypted(&mut plen_byte).await?;
+    let plen = plen_byte[0];
 
-    if ver != SOCKS_VERSION {
-        return Err("Invalid SOCKS version in request".into());
-    }
+    let mut password_bytes = vec![0u8; plen as usize];
+    reader.read_encrypted(&mut password_bytes).await?;
+    let password = String::from_utf8_lossy(&password_bytes);
 
-    match cmd {
-        CMD_CONNECT => handle_tcp(stream, atyp, _encryption, logger).await,
-        CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr, logger).await,
-        _ => {
-            send_reply(&mut stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
-            Err(format!("Unsupported command: {}", cmd).into())
-        }
+    println!("[*] Auth attempt (Encrypted): {} / ...", username);
+
+    let valid_user = env::var("SOCKS_USER").unwrap_or_else(|_| "".to_string());
+    let valid_pass = env::var("SOCKS_PASSWORD").unwrap_or_else(|_| "".to_string());
+
+    if username == valid_user && password == valid_pass {
+        writer.write_encrypted(&[0x01, 0x00]).await?;
+        Ok(())
+    } else {
+        writer.write_encrypted(&[0x01, 0x01]).await?;
+        Err("Authentication failed".into())
     }
 }
 
@@ -296,6 +399,86 @@ async fn handle_tcp_plain(mut client_stream: TcpStream, atyp: u8, logger: Arc<Er
             logger.log(&err_msg);
             let empty_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
             send_reply(&mut client_stream, 0x01, empty_addr).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_tcp_encrypted_pre_initialized(
+    atyp: u8,
+    mut encrypted_reader: EncryptedReader<tokio::net::tcp::OwnedReadHalf>,
+    mut encrypted_writer: EncryptedWriter<tokio::net::tcp::OwnedWriteHalf>,
+    _encryption: Arc<Box<dyn EncryptionLayer>>,
+    logger: Arc<ErrorLogger>,
+) -> Result<(), Box<dyn Error>> {
+    let mut addr_buf = Vec::new();
+    match atyp {
+        ATYP_IPV4 => {
+            let mut bytes = [0u8; 4];
+            encrypted_reader.read_encrypted(&mut bytes).await?;
+            addr_buf.extend_from_slice(&bytes);
+        },
+        ATYP_DOMAIN => {
+            let mut len_byte = [0u8; 1];
+            encrypted_reader.read_encrypted(&mut len_byte).await?;
+            let len = len_byte[0] as usize;
+            addr_buf.push(len_byte[0]);
+            let mut domain_bytes = vec![0u8; len];
+            encrypted_reader.read_encrypted(&mut domain_bytes).await?;
+            addr_buf.extend_from_slice(&domain_bytes);
+        },
+        ATYP_IPV6 => {
+            let mut bytes = [0u8; 16];
+            encrypted_reader.read_encrypted(&mut bytes).await?;
+            addr_buf.extend_from_slice(&bytes);
+        },
+        _ => return Err("Unknown address type".into()),
+    }
+    
+    let mut port_bytes = [0u8; 2];
+    encrypted_reader.read_encrypted(&mut port_bytes).await?;
+    addr_buf.extend_from_slice(&port_bytes);
+    
+    let target_addr = parse_target_addr(atyp, &addr_buf)?;
+    
+    println!("[*] TCP Request to {} (Encrypted Handshake)", target_addr);
+
+    match TcpStream::connect(&target_addr).await {
+        Ok(target_stream) => {
+            let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+            let reply = build_reply(0x00, bind_addr);
+            encrypted_writer.write_encrypted(&reply).await?;
+
+            let (mut target_read, mut target_write) = target_stream.into_split();
+
+            let client_to_target = copy_encrypted_to_plain(&mut encrypted_reader, &mut target_write);
+            let target_to_client = copy_plain_to_encrypted(&mut target_read, &mut encrypted_writer);
+
+            tokio::select! {
+                res = client_to_target => {
+                    if let Err(e) = res {
+                        let err_msg = format!("Encrypted TCP Transmission error (client -> target): {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
+                },
+                res = target_to_client => {
+                    if let Err(e) = res {
+                        let err_msg = format!("Encrypted TCP Transmission error (target -> client): {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
+                },
+            }
+        }
+        Err(e) => {
+            let err_msg = format!("Failed to connect to target {}: {}", target_addr, e);
+            eprintln!("[!] {}", err_msg);
+            logger.log(&err_msg);
+            let empty_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+            let reply = build_reply(0x01, empty_addr);
+            encrypted_writer.write_encrypted(&reply).await?;
         }
     }
 

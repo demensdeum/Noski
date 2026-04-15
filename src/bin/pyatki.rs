@@ -207,45 +207,81 @@ async fn handle_local_client(
 
             // 3. Connect to Remote Noski Server
             let mut remote_stream = TcpStream::connect(&remote_addr).await?;
-            remote_socks5_handshake(&mut remote_stream, &socks_user, &socks_password).await?;
-
-            // 5. Send Request Header to Remote (Plaintext)
-            // We forward the same ATYP
-            remote_stream.write_all(&[SOCKS_VERSION, CMD_CONNECT, RSV, atyp]).await?;
-
-            // 6. Setup Encryption
-            let (remote_read, remote_write) = remote_stream.into_split();
-            let mut encrypted_writer = EncryptedWriter::new(remote_write, Arc::clone(&encryption));
-            let mut encrypted_reader = EncryptedReader::new(remote_read, Arc::clone(&encryption));
-
-            // 7. Send Encrypted Target Address
-            encrypted_writer.write_encrypted(&target_addr_bytes).await?;
-
-            // 8. Read Encrypted Reply from Remote
-            let mut reply_buf = [0u8; 1024];
-            let n = encrypted_reader.read_encrypted(&mut reply_buf).await?;
-            if n == 0 {
-                return Err("Remote server closed connection during handshake".into());
-            }
-            let reply_bytes = &reply_buf[..n];
             
-            // 9. Forward Reply to Local Client (Plaintext)
-            client_stream.write_all(&reply_bytes).await?;
+            let is_passthrough = encryption.name() == "passthrough";
 
-            // Check if reply indicates success (REP = 0x00)
-            if reply_bytes.len() < 2 || reply_bytes[1] != 0x00 {
-                return Err("Remote server returned error".into());
-            }
+            if !is_passthrough {
+                let (read_half, write_half) = remote_stream.into_split();
+                let mut r = EncryptedReader::new(read_half, Arc::clone(&encryption));
+                let mut w = EncryptedWriter::new(write_half, Arc::clone(&encryption));
 
-            // 10. Relay Loop
-            let (mut client_read, mut client_write) = client_stream.into_split();
+                // Perform handshake over the encrypted stream
+                remote_socks5_handshake_encrypted(&mut r, &mut w, &socks_user, &socks_password).await?;
+                
+                // 5. Send Request Header and Target Address
+                w.write_encrypted(&[SOCKS_VERSION, CMD_CONNECT, RSV, atyp]).await?;
+                w.write_encrypted(&target_addr_bytes).await?;
 
-            let client_to_remote = copy_plain_to_encrypted(&mut client_read, &mut encrypted_writer);
-            let remote_to_client = copy_encrypted_to_plain(&mut encrypted_reader, &mut client_write);
+                // 8. Read Reply from Remote
+                let mut reply_buf = [0u8; 1024];
+                let n = r.read_encrypted(&mut reply_buf).await?;
+                if n == 0 {
+                    return Err("Remote server closed connection during handshake".into());
+                }
+                let reply_bytes = reply_buf[..n].to_vec();
 
-            tokio::select! {
-                _ = client_to_remote => {},
-                _ = remote_to_client => {},
+                // 9. Forward Reply to Local Client (Plaintext)
+                client_stream.write_all(&reply_bytes).await?;
+
+                // Check if reply indicates success (REP = 0x00)
+                if reply_bytes.len() < 2 || reply_bytes[1] != 0x00 {
+                    return Err("Remote server returned error".into());
+                }
+
+                // 10. Relay Loop
+                let (mut client_read, mut client_write) = client_stream.into_split();
+                let client_to_remote = copy_plain_to_encrypted(&mut client_read, &mut w);
+                let remote_to_client = copy_encrypted_to_plain(&mut r, &mut client_write);
+
+                tokio::select! {
+                    _ = client_to_remote => {},
+                    _ = remote_to_client => {},
+                }
+            } else {
+                // Passthrough Mode
+                remote_socks5_handshake(&mut remote_stream, &socks_user, &socks_password).await?;
+                
+                // 5. Send Request Header and Target Address
+                remote_stream.write_all(&[SOCKS_VERSION, CMD_CONNECT, RSV, atyp]).await?;
+                remote_stream.write_all(&target_addr_bytes).await?;
+                
+                // 8. Read Reply from Remote
+                let mut reply_header = [0u8; 4];
+                remote_stream.read_exact(&mut reply_header).await?;
+                let reply_atyp = reply_header[3];
+                let (mut addr_bytes, _) = read_addr_bytes(&mut remote_stream, reply_atyp).await?;
+                
+                let mut reply_bytes = reply_header.to_vec();
+                reply_bytes.append(&mut addr_bytes);
+
+                // 9. Forward Reply to Local Client (Plaintext)
+                client_stream.write_all(&reply_bytes).await?;
+
+                // Check if reply indicates success (REP = 0x00)
+                if reply_bytes.len() < 2 || reply_bytes[1] != 0x00 {
+                    return Err("Remote server returned error".into());
+                }
+
+                // 10. Relay Loop
+                let (mut client_read, mut client_write) = client_stream.into_split();
+                let (mut remote_read, mut remote_write) = remote_stream.into_split();
+                let client_to_remote = tokio::io::copy(&mut client_read, &mut remote_write);
+                let remote_to_client = tokio::io::copy(&mut remote_read, &mut client_write);
+
+                tokio::select! {
+                    _ = client_to_remote => {},
+                    _ = remote_to_client => {},
+                }
             }
 
             Ok(())
@@ -257,6 +293,56 @@ async fn handle_local_client(
             send_reply(&mut client_stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
             Err(format!("Unsupported command: {}", cmd).into())
         }
+    }
+}
+
+async fn remote_socks5_handshake_encrypted<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
+    reader: &mut EncryptedReader<R>,
+    writer: &mut EncryptedWriter<W>,
+    socks_user: &Option<String>,
+    socks_password: &Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    // Send Init (advertise supported methods)
+    if socks_user.is_some() && socks_password.is_some() {
+        writer
+            .write_encrypted(&[SOCKS_VERSION, 2, NO_AUTH, USERNAME_PASSWORD_AUTH])
+            .await?;
+    } else {
+        writer.write_encrypted(&[SOCKS_VERSION, 1, NO_AUTH]).await?;
+    }
+
+    // Read Init Reply
+    let mut remote_header = [0u8; 2];
+    reader.read_encrypted(&mut remote_header).await?;
+    if remote_header[0] != SOCKS_VERSION {
+        return Err("Remote server invalid SOCKS version".into());
+    }
+
+    match remote_header[1] {
+        NO_AUTH => Ok(()),
+        USERNAME_PASSWORD_AUTH => {
+            let (user, pass) = match (socks_user, socks_password) {
+                (Some(u), Some(p)) => (u, p),
+                _ => return Err("Remote server requires auth but SOCKS_USER/SOCKS_PASSWORD are not set".into()),
+            };
+
+            let mut auth_req = Vec::with_capacity(3 + user.len() + pass.len());
+            auth_req.push(AUTH_VERSION);
+            auth_req.push(user.len() as u8);
+            auth_req.extend_from_slice(user.as_bytes());
+            auth_req.push(pass.len() as u8);
+            auth_req.extend_from_slice(pass.as_bytes());
+            writer.write_encrypted(&auth_req).await?;
+
+            let mut auth_resp = [0u8; 2];
+            reader.read_encrypted(&mut auth_resp).await?;
+            if auth_resp[0] != AUTH_VERSION || auth_resp[1] != AUTH_SUCCESS {
+                return Err("Remote server authentication failed".into());
+            }
+            Ok(())
+        }
+        0xFF => Err("Remote server rejected all authentication methods".into()),
+        other => Err(format!("Remote server selected unsupported auth method: {}", other).into()),
     }
 }
 

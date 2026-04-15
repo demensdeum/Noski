@@ -49,6 +49,10 @@ impl<R: AsyncRead + Unpin> EncryptedReader<R> {
 
         Ok(copy_len)
     }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
 }
 
 pub struct EncryptedWriter<W> {
@@ -78,6 +82,10 @@ impl<W: AsyncWrite + Unpin> EncryptedWriter<W> {
 
     pub async fn flush(&mut self) -> io::Result<()> {
         self.inner.flush().await
+    }
+
+    pub fn into_inner(self) -> W {
+        self.inner
     }
 }
 
