@@ -8,7 +8,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::error::Error;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
+use chrono::Local;
 use dotenv::dotenv;
 use encryption::{EncryptionLayer, PassthroughEncryption};
 use chacha20_encryption::ChaCha20Encryption;
@@ -24,6 +28,38 @@ const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
 const RSV: u8 = 0x00;
+
+struct ErrorLogger {
+    limit: usize,
+    count: AtomicUsize,
+}
+
+impl ErrorLogger {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    fn log(&self, error: &str) {
+        if self.limit == 0 {
+            return;
+        }
+
+        let current = self.count.fetch_add(1, Ordering::SeqCst);
+        if current < self.limit {
+            if let Ok(mut file) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("noski_errors.log")
+            {
+                let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "[{}] {}", timestamp, error);
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -96,6 +132,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     let encryption = Arc::new(encryption);
     
+    let errors_limit = env::var("ERRORS_COUNT_LOG")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let logger = Arc::new(ErrorLogger::new(errors_limit));
+    
     if env::var("SOCKS_USER").is_ok() && env::var("SOCKS_PASSWORD").is_ok() {
         println!("[*] SOCKS5 Proxy listening on {} (Auth Enabled)", addr);
     } else {
@@ -108,15 +150,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("[+] Accepted connection from {}", addr);
 
         let encryption = Arc::clone(&encryption);
+        let logger = Arc::clone(&logger);
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, addr, encryption).await {
-                eprintln!("[!] Error handling client {}: {}", addr, e);
+            if let Err(e) = handle_client(stream, addr, encryption, logger.clone()).await {
+                let err_msg = format!("Error handling client {}: {}", addr, e);
+                eprintln!("[!] {}", err_msg);
+                logger.log(&err_msg);
             }
         });
     }
 }
 
-async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, _encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
+async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, _encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).await?;
 
@@ -158,8 +203,8 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, _encrypti
     }
 
     match cmd {
-        CMD_CONNECT => handle_tcp(stream, atyp, _encryption).await,
-        CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr).await,
+        CMD_CONNECT => handle_tcp(stream, atyp, _encryption, logger).await,
+        CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr, logger).await,
         _ => {
             send_reply(&mut stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
             Err(format!("Unsupported command: {}", cmd).into())
@@ -204,15 +249,15 @@ async fn authenticate(stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn handle_tcp(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
+async fn handle_tcp(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
     if encryption.name() == "passthrough" {
-        handle_tcp_plain(client_stream, atyp).await
+        handle_tcp_plain(client_stream, atyp, logger).await
     } else {
-        handle_tcp_encrypted(client_stream, atyp, encryption).await
+        handle_tcp_encrypted(client_stream, atyp, encryption, logger).await
     }
 }
 
-async fn handle_tcp_plain(mut client_stream: TcpStream, atyp: u8) -> Result<(), Box<dyn Error>> {
+async fn handle_tcp_plain(mut client_stream: TcpStream, atyp: u8, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
     let target_addr = read_addr_port(&mut client_stream, atyp).await?;
     
     println!("[*] TCP Request to {}", target_addr);
@@ -229,12 +274,26 @@ async fn handle_tcp_plain(mut client_stream: TcpStream, atyp: u8) -> Result<(), 
             let target_to_client = tokio::io::copy(&mut target_read, &mut client_write);
 
             tokio::select! {
-                _ = client_to_target => {},
-                _ = target_to_client => {},
+                res = client_to_target => {
+                    if let Err(e) = res {
+                        let err_msg = format!("TCP Transmission error (client -> target): {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
+                },
+                res = target_to_client => {
+                    if let Err(e) = res {
+                        let err_msg = format!("TCP Transmission error (target -> client): {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
+                },
             }
         }
         Err(e) => {
-            eprintln!("[!] Failed to connect to target: {}", e);
+            let err_msg = format!("Failed to connect to target {}: {}", target_addr, e);
+            eprintln!("[!] {}", err_msg);
+            logger.log(&err_msg);
             let empty_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
             send_reply(&mut client_stream, 0x01, empty_addr).await?;
         }
@@ -243,7 +302,7 @@ async fn handle_tcp_plain(mut client_stream: TcpStream, atyp: u8) -> Result<(), 
     Ok(())
 }
 
-async fn handle_tcp_encrypted(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>) -> Result<(), Box<dyn Error>> {
+async fn handle_tcp_encrypted(client_stream: TcpStream, atyp: u8, encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
     let (client_read, client_write) = client_stream.into_split();
     
     let mut encrypted_reader = EncryptedReader::new(client_read, Arc::clone(&encryption));
@@ -293,12 +352,26 @@ async fn handle_tcp_encrypted(client_stream: TcpStream, atyp: u8, encryption: Ar
             let target_to_client = copy_plain_to_encrypted(&mut target_read, &mut encrypted_writer);
 
             tokio::select! {
-                _ = client_to_target => {},
-                _ = target_to_client => {},
+                res = client_to_target => {
+                    if let Err(e) = res {
+                        let err_msg = format!("Encrypted TCP Transmission error (client -> target): {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
+                },
+                res = target_to_client => {
+                    if let Err(e) = res {
+                        let err_msg = format!("Encrypted TCP Transmission error (target -> client): {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
+                },
             }
         }
         Err(e) => {
-            eprintln!("[!] Failed to connect to target: {}", e);
+            let err_msg = format!("Failed to connect to target {}: {}", target_addr, e);
+            eprintln!("[!] {}", err_msg);
+            logger.log(&err_msg);
             let empty_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
             let reply = build_reply(0x01, empty_addr);
             encrypted_writer.write_encrypted(&reply).await?;
@@ -362,7 +435,7 @@ fn build_reply(rep: u8, bind_addr: SocketAddr) -> Vec<u8> {
 }
 
 
-async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketAddr, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
     let _ = read_addr_port(&mut client_stream, atyp).await?;
 
     let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -404,7 +477,11 @@ async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketA
                             }
                         }
                     }
-                    Err(e) => eprintln!("[!] UDP Recv Error: {}", e),
+                    Err(e) => {
+                        let err_msg = format!("UDP Recv Error: {}", e);
+                        eprintln!("[!] {}", err_msg);
+                        logger.log(&err_msg);
+                    }
                 }
             }
         }
