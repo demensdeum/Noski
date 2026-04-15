@@ -218,10 +218,14 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, encryptio
             .unwrap_or_default()
             .parse::<usize>()
             .unwrap_or(1024 * 1024);
+        
+        let signature = std::env::var("MESSAGE_HEADER_SIGN").ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.into_bytes());
 
         let (read_half, write_half) = stream.into_split();
-        let mut reader = EncryptedReader::new(read_half, Arc::clone(&encryption), max_message_size);
-        let mut writer = EncryptedWriter::new(write_half, Arc::clone(&encryption));
+        let mut reader = EncryptedReader::new(read_half, Arc::clone(&encryption), max_message_size, signature.clone());
+        let mut writer = EncryptedWriter::new(write_half, Arc::clone(&encryption), signature);
 
         let mut header = [0u8; 2];
         reader.read_encrypted(&mut header).await?;
@@ -496,10 +500,14 @@ async fn handle_tcp_encrypted(client_stream: TcpStream, atyp: u8, encryption: Ar
         .parse::<usize>()
         .unwrap_or(1024 * 1024);
 
+    let signature = std::env::var("MESSAGE_HEADER_SIGN").ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.into_bytes());
+
     let (client_read, client_write) = client_stream.into_split();
     
-    let mut encrypted_reader = EncryptedReader::new(client_read, Arc::clone(&encryption), max_message_size);
-    let mut encrypted_writer = EncryptedWriter::new(client_write, Arc::clone(&encryption));
+    let mut encrypted_reader = EncryptedReader::new(client_read, Arc::clone(&encryption), max_message_size, signature.clone());
+    let mut encrypted_writer = EncryptedWriter::new(client_write, Arc::clone(&encryption), signature);
     
     let mut addr_buf = Vec::new();
     match atyp {

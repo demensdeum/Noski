@@ -8,15 +8,17 @@ pub struct EncryptedReader<R> {
     encryption: Arc<Box<dyn EncryptionLayer>>,
     buffer: Vec<u8>,
     max_message_size: usize,
+    signature: Option<Vec<u8>>,
 }
 
 impl<R: AsyncRead + Unpin> EncryptedReader<R> {
-    pub fn new(inner: R, encryption: Arc<Box<dyn EncryptionLayer>>, max_message_size: usize) -> Self {
+    pub fn new(inner: R, encryption: Arc<Box<dyn EncryptionLayer>>, max_message_size: usize, signature: Option<Vec<u8>>) -> Self {
         Self {
             inner,
             encryption,
             buffer: Vec::new(),
             max_message_size,
+            signature,
         }
     }
 
@@ -28,16 +30,24 @@ impl<R: AsyncRead + Unpin> EncryptedReader<R> {
             return Ok(copy_len);
         }
 
+        if let Some(ref sig) = self.signature {
+            let mut sig_buf = vec![0u8; sig.len()];
+            self.inner.read_exact(&mut sig_buf).await?;
+            if sig_buf != *sig {
+                let error_msg = format!("Invalid message signature detected. Expected: {:?}, received: {:?}", hex::encode(sig), hex::encode(sig_buf));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, error_msg));
+            }
+        }
+
         let mut len_bytes = [0u8; 4];
         self.inner.read_exact(&mut len_bytes).await?;
         let len = u32::from_be_bytes(len_bytes) as usize;
 
         if len > self.max_message_size {
-            let error_msg = if len_bytes[0] == 0x05 {
-                "Message too large (Plaintext SOCKS5 protocol detected on encrypted port)"
-            } else {
-                "Message too large"
-            };
+            let mut error_msg = format!("Message too large: {} bytes (limit: {} bytes)", len, self.max_message_size);
+            if len_bytes[0] == 0x05 {
+                error_msg.push_str(". Potential plaintext SOCKS5 protocol detected on encrypted port.");
+            }
             return Err(io::Error::new(io::ErrorKind::InvalidData, error_msg));
         }
 
@@ -65,13 +75,15 @@ impl<R: AsyncRead + Unpin> EncryptedReader<R> {
 pub struct EncryptedWriter<W> {
     inner: W,
     encryption: Arc<Box<dyn EncryptionLayer>>,
+    signature: Option<Vec<u8>>,
 }
 
 impl<W: AsyncWrite + Unpin> EncryptedWriter<W> {
-    pub fn new(inner: W, encryption: Arc<Box<dyn EncryptionLayer>>) -> Self {
+    pub fn new(inner: W, encryption: Arc<Box<dyn EncryptionLayer>>, signature: Option<Vec<u8>>) -> Self {
         Self {
             inner,
             encryption,
+            signature,
         }
     }
 
@@ -80,6 +92,9 @@ impl<W: AsyncWrite + Unpin> EncryptedWriter<W> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
         let len = encrypted.len() as u32;
+        if let Some(ref sig) = self.signature {
+            self.inner.write_all(sig).await?;
+        }
         self.inner.write_all(&len.to_be_bytes()).await?;
         self.inner.write_all(&encrypted).await?;
         self.inner.flush().await?;

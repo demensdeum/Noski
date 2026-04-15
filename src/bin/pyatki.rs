@@ -216,9 +216,13 @@ async fn handle_local_client(
                     .parse::<usize>()
                     .unwrap_or(1024 * 1024);
 
+                let signature = std::env::var("MESSAGE_HEADER_SIGN").ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.into_bytes());
+
                 let (read_half, write_half) = remote_stream.into_split();
-                let mut r = EncryptedReader::new(read_half, Arc::clone(&encryption), max_message_size);
-                let mut w = EncryptedWriter::new(write_half, Arc::clone(&encryption));
+                let mut r = EncryptedReader::new(read_half, Arc::clone(&encryption), max_message_size, signature.clone());
+                let mut w = EncryptedWriter::new(write_half, Arc::clone(&encryption), signature);
 
                 // Perform handshake over the encrypted stream
                 remote_socks5_handshake_encrypted(&mut r, &mut w, &socks_user, &socks_password).await?;
