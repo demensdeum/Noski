@@ -12,6 +12,9 @@ high-performance non-blocking I/O.
     using modern authenticated encryption (see [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for setup).
 -   **🕵️ DPI Evasion Mode**: Obfuscated encryption that makes traffic look like HTTPS/TLS
     to bypass Deep Packet Inspection (see [DPI_EVASION.md](DPI_EVASION.md) for details).
+-   **🛡️ Protocol Hardening**: Configurable message size limits and optional header signatures
+    to prevent memory exhaustion and protocol fingerprinting.
+-   **📝 Error Logging**: Persistent logging of transmission errors to `noski_errors.log`.
 -   **Protocol Support**: Full implementation of the SOCKS5 protocol
     (RFC 1928).
 -   **TCP Support**: Handles `CONNECT` commands for standard TCP
@@ -53,9 +56,20 @@ Noski uses a `.env` file to manage configuration.
 
 2.  Add your configuration:
 
-        ENCRYPTION_KEY=<generated-key-from-first-run>
+        # Core Settings
+        HOST=0.0.0.0
+        PORT=1080
         SOCKS_USER=myuser
         SOCKS_PASSWORD=mypassword
+
+        # Encryption Settings
+        ENCRYPTION_TYPE=chacha20
+        ENCRYPTION_KEY=<generated-key-from-first-run>
+        
+        # Hardening & Reliability
+        MESSAGE_SIZE=1048576       # Max message size in bytes (1MB default)
+        MESSAGE_HEADER_SIGN=magic  # Optional fixed signature for custom clients
+        ERRORS_COUNT_LOG=100       # Number of errors to log to noski_errors.log
 
 ### Encryption Setup
 

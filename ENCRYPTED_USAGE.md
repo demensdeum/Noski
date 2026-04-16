@@ -71,17 +71,21 @@ Clients must implement the same encryption protocol to connect. Here's how the p
 All messages between client and proxy are encrypted and framed:
 
 ```
-[4 bytes: length] [encrypted data]
+[Optional Signature] [4 bytes: length] [encrypted data]
 ```
 
-- **Length**: 32-bit big-endian integer (size of encrypted data)
-- **Encrypted data**: ChaCha20-Poly1305 ciphertext with prepended nonce
+- **Signature**: (Optional) Fixed byte sequence for custom identification.
+- **Length**: 32-bit big-endian integer (size of encrypted data).
+- **Encrypted data**: ChaCha20-Poly1305 ciphertext with prepended nonce.
 
 ### Encrypted Data Format
 
 ```
 [12 bytes: nonce] [ciphertext + 16 bytes auth tag]
 ```
+
+> [!NOTE]
+> The default maximum message size is 1MB. Messages exceeding this limit will be rejected to prevent memory exhaustion. This can be increased via the `MESSAGE_SIZE` environment variable.
 
 ### Example Client Pseudocode
 
@@ -184,6 +188,16 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 - Client sending malformed encrypted messages
 - Check message framing (4-byte length prefix)
+
+### "Potential plaintext SOCKS5 protocol detected..."
+
+- You are trying to connect with a standard SOCKS5 client (curl, browser) directly to the encrypted Noski port.
+- **Fix**: Use the Pyatki client or implement ChaCha20 encryption in your client.
+
+### "Message too large"
+
+- The client sent a packet larger than the `MESSAGE_SIZE` limit (default 1MB).
+- **Fix**: Check client implementation or increase `MESSAGE_SIZE` on the server.
 
 ## Performance
 

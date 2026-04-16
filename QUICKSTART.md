@@ -113,12 +113,17 @@ Requires custom client implementation. See [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.
 
 ### Environment Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `ENCRYPTION_TYPE` | Encryption mode: `passthrough`, `chacha20` | `passthrough` |
-| `ENCRYPTION_KEY` | 256-bit encryption key (64 hex chars) | `a1b2c3d4...` |
-| `SOCKS_USER` | Username for authentication | `myuser` |
-| `SOCKS_PASSWORD` | Password for authentication | `mypass` |
+| Variable | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `HOST` | Interface to listen on | `127.0.0.1` | `127.0.0.1` |
+| `PORT` | Port to listen on | `1080` | `1080` |
+| `ENCRYPTION_TYPE` | `passthrough`, `chacha20`, `obfuscated` | `obfuscated` | `chacha20` |
+| `ENCRYPTION_KEY` | 256-bit key (64 hex chars) | `a1b2c3d4...` | - |
+| `SOCKS_USER` | Username for authentication | `myuser` | - |
+| `SOCKS_PASSWORD` | Password for authentication | `mypass` | - |
+| `MESSAGE_SIZE` | Max message size (OOM protection) | `1048576` | `1MB` |
+| `MESSAGE_HEADER_SIGN`| Optional fixed message signature | `magic` | - |
+| `ERRORS_COUNT_LOG` | Max errors to log to file | `100` | `0` |
 
 ### Example `.env` files
 

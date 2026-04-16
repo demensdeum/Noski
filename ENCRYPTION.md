@@ -8,22 +8,40 @@ The Noski SOCKS5 proxy now includes an abstraction layer for traffic encryption.
 
 ### Core Components
 
-1. **`EncryptionLayer` Trait** (`src/encryption.rs`)
-   - Abstract interface for all encryption implementations
-   - Methods:
-     - `encrypt(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>>`
-     - `decrypt(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>>`
-     - `name(&self) -> &str`
+2. **`EncryptedReader<R>`** (`src/encrypted_stream.rs`)
+   - Wrapper for `AsyncRead` that handles decryption and framing
+   - Features: Signature verification, Max message size enforcement, Plaintext detection
 
-2. **`PassthroughEncryption`** (`src/encryption.rs`)
-   - Default implementation with no encryption
-   - Simply passes data through unchanged
-   - Zero performance overhead
+3. **`EncryptedWriter<W>`** (`src/encrypted_stream.rs`)
+   - Wrapper for `AsyncWrite` that handles encryption and framing
+   - Features: Signature insertion, Correct length prefixing
 
-3. **`EncryptedStream<S>`** (`src/encryption.rs`)
-   - Wrapper for AsyncRead/AsyncWrite streams
-   - Applies encryption/decryption transparently
-   - Currently supports passthrough mode
+4. **`EncryptionLayer` Trait** (`src/encryption.rs`)
+   - Abstract interface for all encryption implementations (ChaCha20, Obfuscated, Passthrough)
+
+## Message Framing
+
+All communication between client and proxy follows this framing protocol:
+
+```
+[Optional: Signature (N bytes)] [Length (4 bytes)] [Encrypted Data (Var)]
+```
+
+- **Signature**: Optional fixed byte sequence used for additional obfuscation and packet identification.
+- **Length**: 32-bit big-endian integer representing the size of the following encrypted data.
+- **Encrypted Data**: Contains the nonce, ciphertext, and authentication tag.
+
+## Security Hardening
+
+### 🚫 Message Size Limits
+The proxy enforces a maximum message size (default 1MB) to prevent memory exhaustion (OOM) attacks from malicious clients. This is configurable via the `MESSAGE_SIZE` environment variable.
+
+### 🛡️ Plaintext Detection
+`EncryptedReader` can detect standard SOCKS5 plaintext greetings (starting with `0x05`) on an encrypted port. This provides clear error messages for configuration mismatches:
+`"Message too large: ... Potential plaintext SOCKS5 protocol detected on encrypted port."`
+
+### 🔑 Nonce Management
+Nonces are managed automatically via an internal counter to ensure each message uses a unique nonce, preventing replay and cryptographic attacks within a session.
 
 ## Usage
 
@@ -96,9 +114,11 @@ See `src/xor_encryption_example.rs` for a complete example implementation (demon
 You can configure the encryption layer via environment variables:
 
 ```bash
-# Future: Add encryption configuration
-ENCRYPTION_TYPE=passthrough  # or "aes-gcm", "chacha20", etc.
-ENCRYPTION_KEY=your-base64-encoded-key
+ENCRYPTION_TYPE=chacha20      # "passthrough", "chacha20", "obfuscated"
+ENCRYPTION_KEY="..."         # 256-bit key (64 hex chars)
+MESSAGE_SIZE=1048576         # Max message size in bytes
+MESSAGE_HEADER_SIGN="magic"  # Optional fixed signature
+ERRORS_COUNT_LOG=100         # Error logging limit
 ```
 
 ## Design Principles

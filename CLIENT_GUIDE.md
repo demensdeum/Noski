@@ -26,8 +26,12 @@ Pyatki is configured via environment variables or a `.env` file.
 |----------|-------------|---------|
 | `PYATKI_LOCAL_ADDR` | Local address to listen on | `127.0.0.1:1081` |
 | `NOSKI_REMOTE_ADDR` | Address of the remote Noski server | **Required** |
-| `ENCRYPTION_TYPE` | Encryption mode (`chacha20`, `obfuscated`) | `chacha20` |
-| `ENCRYPTION_KEY` | Shared encryption key | **Required** (if encrypted) |
+| `ENCRYPTION_TYPE` | `chacha20`, `obfuscated`, `passthrough` | `chacha20` |
+| `ENCRYPTION_KEY` | Shared encryption key | **Required** |
+| `SOCKS_USER` | Remote Noski username | - |
+| `SOCKS_PASSWORD` | Remote Noski password | - |
+| `MESSAGE_SIZE` | Max message size | `1MB` |
+| `MESSAGE_HEADER_SIGN`| Optional header signature | - |
 
 ## Usage Examples
 
@@ -80,8 +84,9 @@ cargo run --release --bin pyatki
 
 ## Troubleshooting
 
-### "Remote server refused NO_AUTH"
-Pyatki currently attempts to connect to Noski using "No Authentication". Ensure your Noski server allows no auth, or update Pyatki to support authentication (planned feature).
+### "Remote server refused authentication"
+- Ensure `SOCKS_USER` and `SOCKS_PASSWORD` are set correctly on BOTH the Pyatki client and the Noski server.
+- The credentials must match exactly.
 
 ### "Connection refused"
 - Check `NOSKI_REMOTE_ADDR` is correct.

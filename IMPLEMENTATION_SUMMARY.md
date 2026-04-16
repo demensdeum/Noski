@@ -3,28 +3,30 @@
 ## What Was Implemented
 
 ### ✅ ChaCha20-Poly1305 Encryption
+Implemented **authenticated encryption** (AEAD) with automatic nonce management and environment variable configuration.
 
-Implemented **authenticated encryption** for all traffic between client and proxy using ChaCha20-Poly1305:
+### ✅ DPI Evasion (Obfuscated Mode)
+Implemented **TLS-like mimicry** and **random padding** to bypass Deep Packet Inspection:
+- **TLS Headers**: Mimics TLS 1.2 Application Data (`0x17 0x03 0x03`).
+- **Random Padding**: 8-32 bytes per packet to break size fingerprinting.
+- **Fixed Signatures**: Optional `MESSAGE_HEADER_SIGN` for custom protocol identification.
 
-- **Algorithm**: ChaCha20-Poly1305 (AEAD - Authenticated Encryption with Associated Data)
-- **Key size**: 256 bits (32 bytes)
-- **Nonce size**: 96 bits (12 bytes)
-- **Authentication tag**: 128 bits (16 bytes)
+### ✅ Protocol Hardening & Reliability
+Implemented safety measures for production environments:
+- **Message Size Limits**: Configurable `MESSAGE_SIZE` (default 1MB) to prevent OOM attacks.
+- **Plaintext Detection**: Proactive identification of standard SOCKS5 traffic on encrypted ports.
+- **Error Logging**: Persistent logging of transmission errors to `noski_errors.log` (configurable limit via `ERRORS_COUNT_LOG`).
 
-### Traffic Flow
+### ✅ Pyatki Client Improvements
+- Supports all encryption and obfuscation modes.
+- Implements SOCKS5 Username/Password authentication for both local and remote connections.
+- Fully compatible with the new hardening measures (Signatures, Size limits).
+
+## Traffic Flow
 
 ```
-[Client] <--ENCRYPTED (ChaCha20-Poly1305)--> [Proxy] <--PLAIN--> [Target Server]
+[Target Server] <--PLAIN (or HTTPS)--> [Noski Server] <--ENCRYPTED/OBFUSCATED--> [Pyatki Client] <--PLAIN SOCKS5--> [App]
 ```
-
-**What's encrypted:**
-- SOCKS5 handshake
-- Authentication credentials
-- Target addresses/domains
-- All application data between client and proxy
-
-**What's NOT encrypted:**
-- Traffic between proxy and target (unless target uses HTTPS/TLS)
 
 ## Files Created/Modified
 
