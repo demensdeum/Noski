@@ -12,7 +12,7 @@ Implemented **TLS-like mimicry** and **random padding** to bypass Deep Packet In
 - **Fixed Signatures**: Optional `MESSAGE_HEADER_SIGN` for custom protocol identification.
 
 ### ✅ Protocol Hardening & Reliability
-Implemented safety measures for production environments:
+- **Encrypted UDP Relay**: All UDP traffic (DNS, gaming, etc.) is now encrypted/decrypted at the proxy level using the configured `EncryptionLayer`.
 - **Message Size Limits**: Configurable `MESSAGE_SIZE` (default 1MB) to prevent OOM attacks.
 - **Plaintext Detection**: Proactive identification of standard SOCKS5 traffic on encrypted ports.
 - **Error Logging**: Persistent logging of transmission errors to `noski_errors.log` (configurable limit via `ERRORS_COUNT_LOG`).

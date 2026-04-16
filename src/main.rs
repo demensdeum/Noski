@@ -206,7 +206,7 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, encryptio
 
         match cmd {
             CMD_CONNECT => handle_tcp(stream, atyp, encryption, logger).await,
-            CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr, logger).await,
+            CMD_UDP_ASSOCIATE => handle_udp(stream, atyp, client_addr, encryption, logger).await,
             _ => {
                 send_reply(&mut stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
                 Err(format!("Unsupported command: {}", cmd).into())
@@ -273,7 +273,7 @@ async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, encryptio
             },
             CMD_UDP_ASSOCIATE => {
                 let s = reader.into_inner().reunite(writer.into_inner())?;
-                handle_udp(s, atyp, client_addr, logger).await
+                handle_udp(s, atyp, client_addr, encryption, logger).await
             },
             _ => {
                 let resp = build_reply(0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0));
@@ -636,7 +636,7 @@ fn build_reply(rep: u8, bind_addr: SocketAddr) -> Vec<u8> {
 }
 
 
-async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketAddr, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
+async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketAddr, encryption: Arc<Box<dyn EncryptionLayer>>, logger: Arc<ErrorLogger>) -> Result<(), Box<dyn Error>> {
     let _ = read_addr_port(&mut client_stream, atyp).await?;
 
     let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -668,12 +668,25 @@ async fn handle_udp(mut client_stream: TcpStream, atyp: u8, client_addr: SocketA
                         }
 
                         if Some(src_addr) == known_client_udp {
-                            if let Some((target_addr, payload)) = unwrap_udp_header(data) {
+                            // Client -> Target
+                            let data = if encryption.name() == "passthrough" {
+                                data.to_vec()
+                            } else {
+                                encryption.decrypt(data).map_err(|e| e as Box<dyn Error>)?
+                            };
+
+                            if let Some((target_addr, payload)) = unwrap_udp_header(&data) {
                                 let _ = udp_socket.send_to(payload, target_addr).await;
                             }
                         } else {
+                            // Target -> Client
                             if let Some(client_udp) = known_client_udp {
                                 let packet = wrap_udp_header(src_addr, data);
+                                let packet = if encryption.name() == "passthrough" {
+                                    packet
+                                } else {
+                                    encryption.encrypt(&packet).map_err(|e| e as Box<dyn Error>)?
+                                };
                                 let _ = udp_socket.send_to(&packet, client_udp).await;
                             }
                         }

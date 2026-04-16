@@ -296,7 +296,7 @@ async fn handle_local_client(
             Ok(())
         }
         CMD_UDP_ASSOCIATE => {
-            handle_udp_associate(client_stream, atyp, remote_addr, socks_user, socks_password).await
+            handle_udp_associate(client_stream, atyp, remote_addr, encryption, socks_user, socks_password).await
         }
         _ => {
             send_reply(&mut client_stream, 0x07, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)).await?;
@@ -412,6 +412,7 @@ async fn handle_udp_associate(
     mut client_stream: TcpStream,
     atyp: u8,
     remote_addr: String,
+    encryption: Arc<Box<dyn EncryptionLayer>>,
     socks_user: Option<String>,
     socks_password: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
@@ -466,11 +467,21 @@ async fn handle_udp_associate(
 
                         // Local client -> remote relay
                         if Some(src_addr) == known_client_udp {
-                            let _ = udp_socket.send_to(data, remote_udp_relay).await;
+                            let encrypted = if encryption.name() == "passthrough" {
+                                data.to_vec()
+                            } else {
+                                encryption.encrypt(data).map_err(|e| e as Box<dyn Error>)?
+                            };
+                            let _ = udp_socket.send_to(&encrypted, remote_udp_relay).await;
                         } else if src_addr == remote_udp_relay {
                             // Remote relay -> local client
                             if let Some(client_udp) = known_client_udp {
-                                let _ = udp_socket.send_to(data, client_udp).await;
+                                let decrypted = if encryption.name() == "passthrough" {
+                                    data.to_vec()
+                                } else {
+                                    encryption.decrypt(data).map_err(|e| e as Box<dyn Error>)?
+                                };
+                                let _ = udp_socket.send_to(&decrypted, client_udp).await;
                             }
                         }
                     }

@@ -12,11 +12,11 @@ The Noski SOCKS5 proxy now features **ChaCha20-Poly1305 encryption** for all tra
 
 **Traffic Flow:**
 ```
-[Client] <--ENCRYPTED--> [Proxy] <--PLAIN--> [Target Server]
+[Client] <--ENCRYPTED (TCP & UDP)--> [Proxy] <--PLAIN--> [Target Server]
 ```
 
-- Traffic between **client and proxy** is **encrypted** with ChaCha20-Poly1305
-- Traffic between **proxy and target** is **plain** (unless the target uses HTTPS/TLS)
+- Traffic between **client and proxy** (both TCP and UDP) is **encrypted** with ChaCha20-Poly1305.
+- Traffic between **proxy and target** is **plain** (unless the target uses HTTPS/TLS/DTLS).
 
 ## Setup
 
