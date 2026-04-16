@@ -14,14 +14,16 @@ high-performance non-blocking I/O.
     to bypass Deep Packet Inspection (see [DPI_EVASION.md](DPI_EVASION.md) for details).
 -   **Protocol Support**: Full implementation of the SOCKS5 protocol
     (RFC 1928).
+-   **Reliable Delivery**: Automatic sequence verification and retransmisson of dropped packets via adjustable `RETRANSMISSION_COUNT`.
+-   **Silent Drop Prevention**: `PING`/`PONG` heartbeat mechanisms preserve long-lived connections.
 -   **TCP Support**: Handles `CONNECT` commands for standard TCP
     tunneling.
 -   **UDP Support**: Handles `UDP ASSOCIATE` for UDP relaying.
 -   **Authentication**: Supports Username/Password authentication (RFC
     1929).
--   **IPv4 & IPv6**: Robust handling of both address types.
 -   **Configuration**: Simple environment-based configuration via
     `.env`.
+
 
 ## Prerequisites
 
@@ -56,6 +58,8 @@ Noski uses a `.env` file to manage configuration.
         ENCRYPTION_KEY=<generated-key-from-first-run>
         SOCKS_USER=myuser
         SOCKS_PASSWORD=mypassword
+        RETRANSMISSION_COUNT=10
+
 
 ### Encryption Setup
 
@@ -70,42 +74,11 @@ On first run without `ENCRYPTION_KEY`, the proxy will generate and display a new
 
 See [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for detailed encryption setup and client implementation.
 
-### Disable Encryption (Standard SOCKS5 Mode)
-
-To use the proxy with **standard SOCKS5 clients** (curl, browsers, etc.) without custom encryption:
-
-Add to your `.env` file:
-```
-ENCRYPTION_TYPE=passthrough
-```
-
-Or run with:
-```bash
-ENCRYPTION_TYPE=passthrough cargo run --release
-```
-
-Output:
-```
-[!] ENCRYPTION DISABLED - Using passthrough mode
-[!] This mode is compatible with standard SOCKS5 clients
-[!] WARNING: All traffic between client and proxy is UNENCRYPTED!
-[*] Encryption Layer: passthrough
-```
-
 **Valid ENCRYPTION_TYPE values:**
-- `passthrough` / `none` / `disabled` - No encryption (standard SOCKS5)
 - `chacha20` / `chacha20-poly1305` / `encrypted` - ChaCha20-Poly1305 encryption (default)
 - `obfuscated` / `dpi` / `tls` - Obfuscated encryption with DPI evasion (see [DPI_EVASION.md](DPI_EVASION.md))
 
-**When to use passthrough:**
-- ✅ Testing with curl or browsers
-- ✅ Using standard SOCKS5 clients
-- ✅ Local development
-
-**When NOT to use passthrough:**
-- ❌ Production deployments
-- ❌ Untrusted networks
-- ❌ When privacy is important
+*(Note: Unencrypted "passthrough" mode is explicitly removed to ensure security by default.)*
 
 ## Client Application (Pyatki)
 

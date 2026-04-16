@@ -15,26 +15,11 @@ The Noski SOCKS5 proxy now includes an abstraction layer for traffic encryption.
      - `decrypt(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>>`
      - `name(&self) -> &str`
 
-2. **`PassthroughEncryption`** (`src/encryption.rs`)
-   - Default implementation with no encryption
-   - Simply passes data through unchanged
-   - Zero performance overhead
-
-3. **`EncryptedStream<S>`** (`src/encryption.rs`)
-   - Wrapper for AsyncRead/AsyncWrite streams
-   - Applies encryption/decryption transparently
-   - Currently supports passthrough mode
+2. **`EncryptedStream<S>`** (`src/encrypted_stream.rs`)
+   - Wrapper for AsyncRead/AsyncWrite streams incorporating reliable protocol enhancements.
+   - Applies encryption/decryption transparently alongside message framing and Sequence ID verification.
 
 ## Usage
-
-### Using the Default (No Encryption)
-
-The proxy uses `PassthroughEncryption` by default:
-
-```rust
-// In main.rs (already configured)
-let encryption: Box<dyn EncryptionLayer> = Box::new(PassthroughEncryption::new());
-```
 
 ### Implementing Custom Encryption
 
@@ -96,8 +81,7 @@ See `src/xor_encryption_example.rs` for a complete example implementation (demon
 You can configure the encryption layer via environment variables:
 
 ```bash
-# Future: Add encryption configuration
-ENCRYPTION_TYPE=passthrough  # or "aes-gcm", "chacha20", etc.
+ENCRYPTION_TYPE=chacha20  # or "obfuscated"
 ENCRYPTION_KEY=your-base64-encoded-key
 ```
 
@@ -121,7 +105,6 @@ ENCRYPTION_KEY=your-base64-encoded-key
 ## Security Considerations
 
 ⚠️ **Important**: 
-- The `PassthroughEncryption` provides NO security
 - The XOR example is for demonstration only - DO NOT use in production
 - For production use, implement proper authenticated encryption (AES-GCM, ChaCha20-Poly1305)
 - Consider using TLS instead of custom encryption
@@ -145,7 +128,6 @@ cargo test
 
 The encryption layer is designed to have minimal overhead:
 
-- **Passthrough**: Zero overhead (data is copied but not transformed)
 - **Custom encryption**: Overhead depends on the algorithm chosen
 - **Future**: Stream-based processing will reduce memory overhead
 

@@ -68,7 +68,7 @@ Clients must implement the same encryption protocol to connect. Here's how the p
 
 ### Message Format
 
-All messages between client and proxy are encrypted and framed:
+All messages between client and proxy are encrypted and framed. The payload inside the encryption now contains delivery control bytes:
 
 ```
 [4 bytes: length] [encrypted data]
@@ -77,11 +77,19 @@ All messages between client and proxy are encrypted and framed:
 - **Length**: 32-bit big-endian integer (size of encrypted data)
 - **Encrypted data**: ChaCha20-Poly1305 ciphertext with prepended nonce
 
-### Encrypted Data Format
+### Decrypted Payload Format
+
+Once decrypted, the internal message payload follows this structure:
 
 ```
-[12 bytes: nonce] [ciphertext + 16 bytes auth tag]
+[1 byte: MessageType] [4 bytes: Sequence ID] [Application Data...]
 ```
+
+- **MessageType**: `0x00` (DATA), `0x01` (ACK), `0x02` (PING), `0x03` (PONG)
+- **Sequence ID**: 32-bit big-endian integer. Used for retransmission matching and duplicate avoidance.
+
+*Note: Due to the complexity of the delivery protocol (retransmissions, sequence IDs, and keep-alive heartbeats), using the official Pyatki client is highly recommended over manually writing scripts.*
+
 
 ### Example Client Pseudocode
 
@@ -235,15 +243,6 @@ Client                          Proxy                    Target
   |<-[ENC: HTTP response]---------|<---[HTTP response]------|
   |                               |                         |
 ```
-
-## Migration from Unencrypted
-
-If you have existing clients using the old unencrypted proxy:
-
-1. Keep old proxy running on port 1080
-2. Start encrypted proxy on port 1081
-3. Migrate clients one by one
-4. Shut down old proxy when all clients migrated
 
 ## License
 

@@ -1,44 +1,78 @@
 # Quick Start Guide
 
-## Option 1: Standard SOCKS5 (No Encryption) - Use with curl, browsers, etc.
+Noski is an encrypted SOCKS5 proxy server. To use it with standard applications (like browsers or curl), you must run the **Noski server** on your remote machine and the **Pyatki client** on your local machine.
 
-### Setup
+*Note: Unencrypted "passthrough" mode has been removed for security. All traffic must be encrypted.*
 
-Add to `.env`:
-```
-ENCRYPTION_TYPE=passthrough
-```
+## Step 1: Run the Noski Server (Remote)
 
-Or run directly:
-```bash
-ENCRYPTION_TYPE=passthrough cargo run --release
-```
+The server receives encrypted traffic, decrypts it, and forwards it to the internet.
 
-### Output
-```
-[!] ENCRYPTION DISABLED - Using passthrough mode
-[!] This mode is compatible with standard SOCKS5 clients
-[!] WARNING: All traffic between client and proxy is UNENCRYPTED!
-[*] SOCKS5 Proxy listening on 127.0.0.1:1080 (OPEN PROXY - No Auth)
-[*] Encryption Layer: passthrough
-```
+1.  **Generate a configuration:**
+    Run the server once to generate a secure encryption key:
+    ```bash
+    cargo run --release
+    ```
+
+    Output:
+    ```
+    [*] Generated new encryption key: a1b2c3d4e5f6789...
+    [!] Save this key to .env as: ENCRYPTION_KEY=a1b2c3d4e5f6789...
+    ```
+
+2.  **Save the key and configure `.env`**:
+    Create a `.env` file on the server:
+    ```ini
+    ENCRYPTION_KEY=a1b2c3d4e5f6789...
+    SOCKS_USER=myuser
+    SOCKS_PASSWORD=mypassword
+    RETRANSMISSION_COUNT=10
+    ```
+
+3.  **Start the server:**
+    ```bash
+    cargo run --release
+    ```
+    *The server is now listening on port 1080.*
+
+---
+
+## Step 2: Run the Pyatki Client (Local)
+
+Pyatki acts as a translator. It accepts standard SOCKS5 traffic from your local apps, encrypts it, and sends it to the Noski server.
+
+1.  **Configure `.env` on your local machine**:
+    Create a `.env` file where you run Pyatki. You MUST use the exact same `ENCRYPTION_KEY` as the server.
+    ```ini
+    # Remote Noski server IP and Port
+    NOSKI_REMOTE_ADDR=1.2.3.4:1080
+    
+    # Local port for Pyatki to listen on
+    PYATKI_LOCAL_ADDR=127.0.0.1:1081
+    
+    # Matching credentials and key
+    ENCRYPTION_KEY=a1b2c3d4e5f6789...
+    
+    # Optional delivery control
+    RETRANSMISSION_COUNT=10
+    ```
+
+2.  **Start the Pyatki client:**
+    ```bash
+    cargo run --release --bin pyatki
+    ```
+    *Pyatki is now listening locally on `127.0.0.1:1081`.*
+
+---
+
+## Step 3: Connect Your Applications
+
+Now that Pyatki is running locally, you can point any SOCKS5-compatible application to it!
 
 ### Usage with curl
 
 ```bash
-curl -x socks5://127.0.0.1:1080 https://www.google.com
-```
-
-With authentication (add to `.env`):
-```
-ENCRYPTION_TYPE=passthrough
-SOCKS_USER=myuser
-SOCKS_PASSWORD=mypass
-```
-
-Then:
-```bash
-curl -x socks5://myuser:mypass@127.0.0.1:1080 https://www.google.com
+curl -x socks5://127.0.0.1:1081 https://api.ipify.org
 ```
 
 ### Usage with browsers
@@ -46,157 +80,26 @@ curl -x socks5://myuser:mypass@127.0.0.1:1080 https://www.google.com
 **Firefox:**
 1. Settings → Network Settings → Manual proxy configuration
 2. SOCKS Host: `127.0.0.1`
-3. Port: `1080`
+3. Port: `1081`
 4. Select: SOCKS v5
 
 **Chrome/Edge:**
 ```bash
-chrome.exe --proxy-server="socks5://127.0.0.1:1080"
+chrome.exe --proxy-server="socks5://127.0.0.1:1081"
 ```
-
----
-
-## Option 2: Encrypted Mode (ChaCha20-Poly1305) - Requires custom client
-
-### Setup
-
-**First run** (generates key):
-```bash
-cargo run --release
-```
-
-Output:
-```
-[*] Generated new encryption key: a1b2c3d4e5f6789...
-[!] Save this key to .env as: ENCRYPTION_KEY=a1b2c3d4e5f6789...
-[!] Clients must use the same key to connect!
-[*] Encryption Layer: chacha20-poly1305
-```
-
-**Save the key** to `.env`:
-```
-ENCRYPTION_KEY=a1b2c3d4e5f6789...
-```
-
-**Subsequent runs**:
-```bash
-cargo run --release
-```
-
-Output:
-```
-[*] Loaded encryption key from ENCRYPTION_KEY environment variable
-[*] Encryption Layer: chacha20-poly1305
-```
-
-### Usage
-
-Requires custom client implementation. See [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for details.
-
----
-
-## Comparison
-
-| Feature | Passthrough Mode | Encrypted Mode |
-|---------|------------------|----------------|
-| **Client compatibility** | ✅ Standard SOCKS5 clients | ❌ Custom client required |
-| **Encryption** | ❌ None | ✅ ChaCha20-Poly1305 |
-| **Setup difficulty** | ✅ Easy | ⚠️ Moderate |
-| **Use with curl** | ✅ Yes | ❌ No |
-| **Use with browsers** | ✅ Yes | ❌ No |
-| **Security** | ⚠️ Unencrypted | ✅ Encrypted |
-| **Best for** | Testing, local dev | Production, privacy |
-
----
-
-## Configuration Options
-
-### Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `ENCRYPTION_TYPE` | Encryption mode: `passthrough`, `chacha20` | `passthrough` |
-| `ENCRYPTION_KEY` | 256-bit encryption key (64 hex chars) | `a1b2c3d4...` |
-| `SOCKS_USER` | Username for authentication | `myuser` |
-| `SOCKS_PASSWORD` | Password for authentication | `mypass` |
-
-### Example `.env` files
-
-**Passthrough with auth:**
-```
-ENCRYPTION_TYPE=passthrough
-SOCKS_USER=admin
-SOCKS_PASSWORD=secret123
-```
-
-**Encrypted with auth:**
-```
-ENCRYPTION_TYPE=chacha20
-ENCRYPTION_KEY=a1b2c3d4e5f6789abcdef...
-SOCKS_USER=admin
-SOCKS_PASSWORD=secret123
-```
-
-**Passthrough without auth (not recommended):**
-```
-ENCRYPTION_TYPE=passthrough
-```
-
----
-
-## Testing
-
-### Test passthrough mode with curl
-
-```bash
-# Start proxy in passthrough mode
-ENCRYPTION_TYPE=passthrough cargo run --release
-
-# In another terminal
-curl -v -x socks5://127.0.0.1:1080 https://www.google.com
-```
-
-### Test encrypted mode
-
-See [ENCRYPTED_USAGE.md](ENCRYPTED_USAGE.md) for client implementation examples.
-
----
 
 ## Troubleshooting
 
 ### "Connection refused"
-- Proxy not running
-- Check if port 1080 is available
-
-### "Authentication failed"
-- Wrong username/password
-- Check `SOCKS_USER` and `SOCKS_PASSWORD` in `.env`
-
-### curl doesn't work
-- Make sure `ENCRYPTION_TYPE=passthrough` is set
-- Encrypted mode requires custom client
+- Check that Pyatki is running locally.
+- Confirm Pyatki can reach your remote Noski server IP/Port.
 
 ### "Decryption failed"
-- Wrong encryption key
-- Client and server keys must match
-- Or you're using standard client with encrypted mode
+- Your `ENCRYPTION_KEY` does not match between the server and the client.
 
----
+### "Authentication failed"
+- Ensure `SOCKS_USER` and `SOCKS_PASSWORD` match on both sides, or that you aren't trying to auth against a server that doesn't have them configured.
 
-## Recommendations
+### Connection drops / High latency
+- Pyatki actively monitors the TCP stream and retransmits lost packets. Check your terminal output and `noski_errors.log` to see if your network is dropping significant amounts of packets. You can increase `RETRANSMISSION_COUNT` in `.env` to handle severely degraded connections.
 
-**For development/testing:**
-```bash
-ENCRYPTION_TYPE=passthrough cargo run --release
-```
-
-**For production:**
-```bash
-# Set in .env:
-ENCRYPTION_TYPE=chacha20
-ENCRYPTION_KEY=<your-key>
-SOCKS_USER=<username>
-SOCKS_PASSWORD=<password>
-
-cargo run --release
-```

@@ -11,6 +11,12 @@ Implemented **authenticated encryption** for all traffic between client and prox
 - **Nonce size**: 96 bits (12 bytes)
 - **Authentication tag**: 128 bits (16 bytes)
 
+### ✅ Reliable TCP Delivery
+Implemented active delivery control and tracking mechanisms over the encrypted tunnel:
+- **`PING`/`PONG` Heartbeats**: Keeps connections alive and actively detects dropped routes.
+- **Sequence Verification**: Automatic duplicate detection to prevent redundant TCP bytes.
+- **Lost Packet Retransmission**: Unacknowledged packets are re-transmitted based on `.env` configuration (default `10` times).
+
 ### Traffic Flow
 
 ```
@@ -83,6 +89,8 @@ Every message between client and proxy uses this format:
 
 - **Length**: 32-bit big-endian integer (size of encrypted data)
 - **Encrypted Data**: Nonce + Ciphertext + Auth Tag
+
+*Note: As part of the reliable delivery mechanism, the fully decrypted plaintext payload has an inherent prefix tracking MessageTypes and Sequence ID.*
 
 ### Encrypted Data Format
 
@@ -224,14 +232,15 @@ Client --[PLAIN SOCKS5]--> Proxy --[PLAIN]--> Target
 - ❌ Target addresses visible
 - ✅ Zero overhead
 
-### After (ChaCha20-Poly1305)
+### After (ChaCha20-Poly1305 + Delivery Control)
 ```
-Client --[ENCRYPTED]--> Proxy --[PLAIN]--> Target
+Client --[ENCRYPTED & RELIABLE]--> Proxy --[PLAIN]--> Target
 ```
 - ✅ Full encryption client-to-proxy
 - ✅ Credentials protected
 - ✅ Target addresses hidden
-- ✅ Minimal overhead (~32 bytes/message)
+- ✅ Heartbeat connection preservation and packet-loss retransmission
+- ✅ Minimal overhead (~37 bytes/message total)
 
 ## Future Enhancements
 

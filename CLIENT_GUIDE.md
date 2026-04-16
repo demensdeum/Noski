@@ -10,6 +10,8 @@
 
 This allows you to use **any standard SOCKS5 application** with the encrypted Noski proxy.
 
+Pyatki also implements the reliable TCP delivery protocol to shield your connection from packet loss by communicating with the `RETRANSMISSION_COUNT` limit via `PING`/`PONG` and sequence IDs.
+
 ## Build
 
 ```bash
@@ -28,6 +30,7 @@ Pyatki is configured via environment variables or a `.env` file.
 | `NOSKI_REMOTE_ADDR` | Address of the remote Noski server | **Required** |
 | `ENCRYPTION_TYPE` | Encryption mode (`chacha20`, `obfuscated`) | `chacha20` |
 | `ENCRYPTION_KEY` | Shared encryption key | **Required** (if encrypted) |
+| `RETRANSMISSION_COUNT` | Number of times Pyatki will retry sending unacknowledged TCP proxy payloads | `10` |
 
 ## Usage Examples
 
