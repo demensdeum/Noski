@@ -1,3 +1,6 @@
+
+</think>
+
 # Noski - SOCKS5 Proxy Server in Rust
 
 ![Logo](logo.jpg "Logo")
@@ -36,7 +39,7 @@ high-performance non-blocking I/O.
 1.  **Clone the repository:**
 
     ``` sh
-    git clone https://github.com/yourusername/noski.git
+    git clone https://github.com/zefir1990/noski.git
     cd noski
     ```
 
